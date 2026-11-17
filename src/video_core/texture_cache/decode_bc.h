@@ -33,6 +33,10 @@ void DecompressBCn(std::span<const u8> input, std::span<u8> output, BufferImageC
 
 /// BC1-3 colors decoded by DecompressBCn use the guest texture unit's interpolation
 /// (GuestBc1Palette) instead of exact thirds. Off by default.
+/// Makes this thread's BC decodes run on it alone instead of spreading large levels across
+/// helper threads: a background decoder must not compete with the game for cores.
+void SetBcDecodeSingleThreaded(bool single) noexcept;
+
 /// Bytes one decoded depth slice of the level in copy takes (DecompressBCn's output for it).
 [[nodiscard]] size_t DecodedBcSliceBytes(const BufferImageCopy& copy,
                                          VideoCore::Surface::PixelFormat pixel_format,

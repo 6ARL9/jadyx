@@ -127,7 +127,6 @@ struct AsyncDecodeContext {
     bool streaming{};
     BufferImageCopy stream_copy{}; ///< The whole level as uploaded (tight rows, offset 0).
     std::deque<Chunk> ready_chunks;               ///< Decoded, waiting for upload (mutex).
-    std::vector<std::vector<u8>> free_chunks;     ///< Uploaded, for the worker to reuse (mutex).
     std::atomic_bool stop{}; ///< Cancelled: the worker decodes no further chunk.
 };
 
@@ -729,6 +728,10 @@ private:
     /// Input buffers of finished asynchronous decodes, reused so a large image's blocks are not
     /// zero-filled and first touched on the GPU thread at every reload.
     std::vector<std::vector<u8>> async_decode_inputs;
+    /// Chunk buffers of streamed decodes, shared by all of them so each reload reuses memory
+    /// already touched (the TextureDecoder thread takes, the GPU thread gives back).
+    std::mutex decode_chunk_mutex;
+    std::vector<std::vector<u8>> decode_chunk_pool;
 
     std::deque<PendingUnswizzle> unswizzle_queue;
     u8 current_unswizzle_frame;

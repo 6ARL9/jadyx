@@ -34,6 +34,7 @@
 #include "video_core/texture_cache/image_view_base.h"
 #include "video_core/texture_cache/samples_helper.h"
 #include "video_core/texture_cache/texture_cache_base.h"
+#include "common/thread.h"
 #include "video_core/texture_cache/decode_bc.h"
 #include "video_core/texture_cache/util.h"
 #include "video_core/textures/decoders.h"
@@ -1906,7 +1907,7 @@ void TextureCache<P>::QueueAsyncDecode(Image& image, ImageId image_id) {
     // volume) never sits in memory whole. Two of them at once pushed a game near its memory limit
     // into paging its RAM out on area loads.
     constexpr size_t STREAMED_DECODE_MIN = 32_MiB;
-    constexpr size_t STREAMED_DECODE_CHUNK = 16_MiB;
+    constexpr size_t STREAMED_DECODE_CHUNK = 8_MiB;
     const bool stream =
         IsPixelFormatBCn(image.info.format) && image.info.type == ImageType::e3D &&
         image.info.resources.levels == 1 && copies.size() == 1 &&
@@ -1928,7 +1929,12 @@ void TextureCache<P>::QueueAsyncDecode(Image& image, ImageId image_id) {
             static_cast<u32>((std::max<size_t>)(STREAMED_DECODE_CHUNK / slice_bytes, 1));
         auto stream_func = [copy, info = image.info, slice_bytes, chunk_slices,
                             input = std::move(local_unswizzle_data_buffer),
-                            async_decode = decode_ptr]() mutable {
+                            async_decode = decode_ptr, pool = &decode_chunk_pool,
+                            pool_mutex = &decode_chunk_mutex]() mutable {
+            // In the background the decode need not be fast, only out of the game's way: one
+            // core, below the emulated ones.
+            Common::SetCurrentThreadPriority(Common::ThreadPriority::Low);
+            SetBcDecodeSingleThreaded(true);
             const std::span<const u8> blocks = std::span<const u8>{input}.subspan(copy.buffer_offset);
             const u32 depth = copy.image_extent.depth;
             for (u32 first = 0; first < depth; first += chunk_slices) {
@@ -1938,10 +1944,10 @@ void TextureCache<P>::QueueAsyncDecode(Image& image, ImageId image_id) {
                 const u32 count = (std::min)(chunk_slices, depth - first);
                 std::vector<u8> data;
                 {
-                    std::scoped_lock lock{async_decode->mutex};
-                    if (!async_decode->free_chunks.empty()) {
-                        data = std::move(async_decode->free_chunks.back());
-                        async_decode->free_chunks.pop_back();
+                    std::scoped_lock lock{*pool_mutex};
+                    if (!pool->empty()) {
+                        data = std::move(pool->back());
+                        pool->pop_back();
                     }
                 }
                 data.resize(slice_bytes * count);
@@ -1962,6 +1968,8 @@ void TextureCache<P>::QueueAsyncDecode(Image& image, ImageId image_id) {
     auto func = [out_size, copies, info = image.info,
                  input = std::move(local_unswizzle_data_buffer),
                  async_decode = decode_ptr]() mutable {
+        Common::SetCurrentThreadPriority(Common::ThreadPriority::Low);
+        SetBcDecodeSingleThreaded(true);
         async_decode->decoded_data.resize_destructive(out_size);
         std::span copies_span{copies.data(), copies.size()};
         ConvertImage(input, info, async_decode->decoded_data, copies_span);
@@ -2024,9 +2032,15 @@ void TextureCache<P>::TickAsyncDecode() {
                     frame_budget =
                         chunk.data.size() >= frame_budget ? 0 : frame_budget - chunk.data.size();
                     has_uploads = true;
+                    {
+                        // Four chunks cover the decoder running ahead of the uploads.
+                        std::scoped_lock pool_lock{decode_chunk_mutex};
+                        if (decode_chunk_pool.size() < 4) {
+                            decode_chunk_pool.push_back(std::move(chunk.data));
+                        }
+                    }
                     lock.lock();
                     async_decode->uploaded_slices += chunk.num_slices;
-                    async_decode->free_chunks.push_back(std::move(chunk.data));
                 }
             }
             if (!async_decode->complete ||
