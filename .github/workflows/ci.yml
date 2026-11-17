@@ -17,6 +17,10 @@ on:
         description: Also make a signed test appx
         type: boolean
         default: true
+      lto:
+        description: Link-time optimize the emulator's libraries, as releases ship
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -37,4 +41,5 @@ jobs:
     uses: ./.github/workflows/build.yml
     with:
       package: ${{ github.event_name == 'workflow_dispatch' && inputs.package }}
+      lto: ${{ github.event_name == 'workflow_dispatch' && inputs.lto }}
     secrets: inherit
