@@ -7,6 +7,7 @@
 #pragma once
 
 #include <algorithm>
+#include <atomic>
 #include <cstring>
 #include <memory>
 #include <numeric>
@@ -1773,6 +1774,17 @@ void BufferCache<P>::UpdateVertexBuffer(u32 index) {
     const std::optional<DAddr> device_addr = gpu_memory->GpuToCpuAddress(gpu_addr_begin);
     const u32 address_size = static_cast<u32>(gpu_addr_end - gpu_addr_begin);
     u32 size = address_size; // TODO: Analyze stride and number of vertices
+    if (array.enable != 0 && gpu_addr_end <= gpu_addr_begin) {
+        // A limit below the start (a stream moved without its limit) fetches nothing on the
+        // hardware. As a u32 the difference wraps to almost 4 GiB, a buffer no host can allocate:
+        // Metroid Prime Remastered asked for 0xFFD50000 bytes and shut down.
+        static std::atomic<u32> warnings{};
+        if (warnings.fetch_add(1, std::memory_order_relaxed) < 8) {
+            LOG_WARNING(HW_GPU, "Vertex stream {} limit {:#x} is below its start {:#x}; bound empty",
+                        index, limit.Address(), gpu_addr_begin);
+        }
+        size = 0;
+    }
     if (array.enable == 0 || size == 0 || !device_addr) {
         channel_state->vertex_buffers[index] = NULL_BINDING;
         UpdateVertexBufferSlot(index, NULL_BINDING);
@@ -2157,6 +2169,11 @@ BufferId BufferCache<P>::CreateBuffer(DAddr device_addr, u32 wanted_size,
     wanted_size = static_cast<u32>(device_addr_end - device_addr);
     const OverlapResult overlap = ResolveOverlaps(device_addr, wanted_size);
     const u32 size = static_cast<u32>(overlap.end - overlap.begin);
+    if (size >= (1U << 30)) [[unlikely]] {
+        // Nothing a game binds is this large; it is a size that wrapped. Say where it came from.
+        LOG_WARNING(HW_GPU, "Buffer of {} MiB requested at {:#x} ({} MiB asked, {} overlaps)",
+                    size >> 20, device_addr, wanted_size >> 20, overlap.ids.size());
+    }
     const BufferId new_buffer_id =
         slot_buffers.insert(runtime, overlap.begin, size, sparse_compatible);
     auto& new_buffer = slot_buffers[new_buffer_id];
