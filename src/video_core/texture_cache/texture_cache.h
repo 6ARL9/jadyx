@@ -34,6 +34,7 @@
 #include "video_core/texture_cache/image_view_base.h"
 #include "video_core/texture_cache/samples_helper.h"
 #include "video_core/texture_cache/texture_cache_base.h"
+#include "video_core/texture_cache/decode_bc.h"
 #include "video_core/texture_cache/util.h"
 #include "video_core/textures/decoders.h"
 
@@ -1880,6 +1881,7 @@ void TextureCache<P>::QueueAsyncDecode(Image& image, ImageId image_id) {
     for (const auto& pending : async_decodes) {
         if (pending->image_id == image_id) {
             pending->cancelled = true;
+            pending->stop = true;
         }
     }
     auto decode = std::make_unique<AsyncDecodeContext>();
@@ -1899,6 +1901,62 @@ void TextureCache<P>::QueueAsyncDecode(Image& image, ImageId image_id) {
     if constexpr (requires { image.PreserveGuestBlocks(local_unswizzle_data_buffer, copies); }) {
         image.PreserveGuestBlocks(local_unswizzle_data_buffer, copies);
     }
+    // A large BC volume decodes a few slices at a time: the GPU thread uploads each chunk as it
+    // comes and hands its buffer back, so the decoded volume (184 MiB for a 512x256x368 light
+    // volume) never sits in memory whole. Two of them at once pushed a game near its memory limit
+    // into paging its RAM out on area loads.
+    constexpr size_t STREAMED_DECODE_MIN = 32_MiB;
+    constexpr size_t STREAMED_DECODE_CHUNK = 16_MiB;
+    const bool stream =
+        IsPixelFormatBCn(image.info.format) && image.info.type == ImageType::e3D &&
+        image.info.resources.levels == 1 && copies.size() == 1 &&
+        copies[0].image_subresource.num_layers <= 1 && copies[0].image_extent.depth > 1 &&
+        copies[0].image_offset == Offset3D{} &&
+        DecodedBcSliceBytes(copies[0], image.info.format, image.info.type) *
+                copies[0].image_extent.depth >=
+            STREAMED_DECODE_MIN;
+    if (stream) {
+        const BufferImageCopy copy = copies[0];
+        BufferImageCopy upload = copy;
+        upload.buffer_offset = 0;
+        upload.buffer_row_length = copy.image_extent.width;
+        upload.buffer_image_height = copy.image_extent.height;
+        decode_ptr->streaming = true;
+        decode_ptr->stream_copy = upload;
+        const size_t slice_bytes = DecodedBcSliceBytes(copy, image.info.format, image.info.type);
+        const u32 chunk_slices =
+            static_cast<u32>((std::max<size_t>)(STREAMED_DECODE_CHUNK / slice_bytes, 1));
+        auto stream_func = [copy, info = image.info, slice_bytes, chunk_slices,
+                            input = std::move(local_unswizzle_data_buffer),
+                            async_decode = decode_ptr]() mutable {
+            const std::span<const u8> blocks = std::span<const u8>{input}.subspan(copy.buffer_offset);
+            const u32 depth = copy.image_extent.depth;
+            for (u32 first = 0; first < depth; first += chunk_slices) {
+                if (async_decode->stop.load(std::memory_order_relaxed)) {
+                    break;
+                }
+                const u32 count = (std::min)(chunk_slices, depth - first);
+                std::vector<u8> data;
+                {
+                    std::scoped_lock lock{async_decode->mutex};
+                    if (!async_decode->free_chunks.empty()) {
+                        data = std::move(async_decode->free_chunks.back());
+                        async_decode->free_chunks.pop_back();
+                    }
+                }
+                data.resize(slice_bytes * count);
+                DecompressBCnSlices(blocks, data, copy, info.format, info.type, first, count);
+                std::scoped_lock lock{async_decode->mutex};
+                async_decode->ready_chunks.push_back({first, count, std::move(data)});
+            }
+            std::scoped_lock lock{async_decode->mutex};
+            async_decode->input = std::move(input);
+            async_decode->complete = true;
+        };
+        texture_decode_worker.QueueWork(std::move(stream_func));
+        return;
+    }
+
     const size_t out_size = MapSizeBytes(image);
 
     auto func = [out_size, copies, info = image.info,
@@ -1950,6 +2008,40 @@ void TextureCache<P>::TickAsyncDecode() {
     while (i != async_decodes.end()) {
         auto* async_decode = i->get();
         std::unique_lock lock{async_decode->mutex};
+        if (async_decode->streaming) {
+            if (!async_decode->cancelled) {
+                Image& image = slot_images[async_decode->image_id];
+                while (!async_decode->ready_chunks.empty() && frame_budget > 0) {
+                    AsyncDecodeContext::Chunk chunk = std::move(async_decode->ready_chunks.front());
+                    async_decode->ready_chunks.pop_front();
+                    lock.unlock(); // The worker goes on with the next chunk meanwhile.
+                    auto staging = runtime.UploadStagingBuffer(chunk.data.size());
+                    std::memcpy(staging.mapped_span.data(), chunk.data.data(), chunk.data.size());
+                    BufferImageCopy part = async_decode->stream_copy;
+                    part.image_offset.z = static_cast<s32>(chunk.first_slice);
+                    part.image_extent.depth = chunk.num_slices;
+                    image.UploadMemory(staging, std::span<const BufferImageCopy>{&part, 1});
+                    frame_budget =
+                        chunk.data.size() >= frame_budget ? 0 : frame_budget - chunk.data.size();
+                    has_uploads = true;
+                    lock.lock();
+                    async_decode->uploaded_slices += chunk.num_slices;
+                    async_decode->free_chunks.push_back(std::move(chunk.data));
+                }
+            }
+            if (!async_decode->complete ||
+                (!async_decode->cancelled && !async_decode->ready_chunks.empty())) {
+                ++i; // The worker still decodes, or chunks wait for the next frame.
+                continue;
+            }
+            if (!async_decode->cancelled) {
+                slot_images[async_decode->image_id].flags &= ~ImageFlagBits::IsDecoding;
+            }
+            recycle_input(*async_decode);
+            lock.unlock(); // The mutex goes with the context.
+            i = async_decodes.erase(i);
+            continue;
+        }
         if (!async_decode->complete) {
             ++i;
             continue;
@@ -3527,6 +3619,7 @@ void TextureCache<P>::DeleteImage(ImageId image_id, bool immediate_delete) {
     for (const auto& async_decode : async_decodes) {
         if (async_decode->image_id == image_id) {
             async_decode->cancelled = true;
+            async_decode->stop = true;
         }
     }
     if (AliasCapture::Wants(image)) {

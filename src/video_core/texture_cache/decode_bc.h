@@ -33,6 +33,18 @@ void DecompressBCn(std::span<const u8> input, std::span<u8> output, BufferImageC
 
 /// BC1-3 colors decoded by DecompressBCn use the guest texture unit's interpolation
 /// (GuestBc1Palette) instead of exact thirds. Off by default.
+/// Bytes one decoded depth slice of the level in copy takes (DecompressBCn's output for it).
+[[nodiscard]] size_t DecodedBcSliceBytes(const BufferImageCopy& copy,
+                                         VideoCore::Surface::PixelFormat pixel_format,
+                                         ImageType type);
+
+/// DecompressBCn for the depth slices [first_slice, first_slice + num_slices) of the level in
+/// copy only, tightly packed into output, so a large volume can be decoded and uploaded a piece at
+/// a time instead of whole.
+void DecompressBCnSlices(std::span<const u8> input, std::span<u8> output,
+                         const BufferImageCopy& copy, VideoCore::Surface::PixelFormat pixel_format,
+                         ImageType type, u32 first_slice, u32 num_slices);
+
 void SetBcGuestPalette(bool enabled) noexcept;
 [[nodiscard]] bool GetBcGuestPalette() noexcept;
 

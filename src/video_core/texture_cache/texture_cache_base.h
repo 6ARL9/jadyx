@@ -116,6 +116,19 @@ struct AsyncDecodeContext {
     std::vector<u8> input;
     /// Depth slices already uploaded, for volumes uploaded a few slices per frame.
     u32 uploaded_slices{};
+
+    /// Streamed decode (large BC volumes): the worker decodes a few slices at a time into chunks
+    /// the GPU thread uploads as they come, so the whole decoded volume never sits in memory.
+    struct Chunk {
+        u32 first_slice;
+        u32 num_slices;
+        std::vector<u8> data;
+    };
+    bool streaming{};
+    BufferImageCopy stream_copy{}; ///< The whole level as uploaded (tight rows, offset 0).
+    std::deque<Chunk> ready_chunks;               ///< Decoded, waiting for upload (mutex).
+    std::vector<std::vector<u8>> free_chunks;     ///< Uploaded, for the worker to reuse (mutex).
+    std::atomic_bool stop{}; ///< Cancelled: the worker decodes no further chunk.
 };
 
 using TextureCacheGPUMap = ::Common::unordered_map<u64, std::vector<ImageId>, Common::IdentityHash<u64>>;

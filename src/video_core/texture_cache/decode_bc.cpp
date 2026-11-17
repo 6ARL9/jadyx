@@ -398,4 +398,26 @@ void DecompressBCn(std::span<const u8> input, std::span<u8> output, BufferImageC
     ForEachSliceRange(copy.image_extent.depth, slice_texels, pack_slices);
 }
 
+size_t DecodedBcSliceBytes(const BufferImageCopy& copy, PixelFormat pixel_format, ImageType type) {
+    return static_cast<size_t>(copy.image_extent.width) * copy.image_extent.height *
+           static_cast<size_t>((std::max)(copy.image_subresource.num_layers, 1)) *
+           ConvertedBytesPerBlock(pixel_format, type);
+}
+
+void DecompressBCnSlices(std::span<const u8> input, std::span<u8> output,
+                         const BufferImageCopy& copy, PixelFormat pixel_format, ImageType type,
+                         u32 first_slice, u32 num_slices) {
+    // The same slice stride DecompressBlocks walks: every layer's rows of blocks.
+    const u32 layers = static_cast<u32>((std::max)(copy.image_subresource.num_layers, 1));
+    const size_t input_row_pitch =
+        (static_cast<size_t>(copy.buffer_row_length) + BLOCK_SIZE - 1) / BLOCK_SIZE *
+        BlockSize(pixel_format);
+    const size_t input_slice = static_cast<size_t>(layers) *
+                               ((copy.image_extent.height + BLOCK_SIZE - 1) / BLOCK_SIZE) *
+                               input_row_pitch;
+    BufferImageCopy part = copy;
+    part.image_extent.depth = num_slices;
+    DecompressBCn(input.subspan(first_slice * input_slice), output, part, pixel_format, type);
+}
+
 } // namespace VideoCommon
