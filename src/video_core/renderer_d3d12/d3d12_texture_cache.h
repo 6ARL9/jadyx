@@ -809,8 +809,8 @@ class ImageAlloc : public VideoCommon::ImageAllocBase {};
 /// "bc_arrays=native" keeps them compressed). Applies to images created from now on.
 void SetBcArrayDecode(bool enabled);
 
-/// Which block-compressed 3D textures are decoded on the CPU like 2D arrays: 0 none (the
-/// default), 1 BC6H only (boot.cfg "bc_3d=hdr"), 2 all ("bc_3d=decode"). The Series' texture
+/// Which block-compressed 3D textures are decoded on the CPU like 2D arrays: 0 none (boot.cfg
+/// "bc_3d=native"), 1 BC6H only (the default, "bc_3d=hdr"), 2 all ("bc_3d=decode"). The Series' texture
 /// unit may read their depth slices from another place than the copy engine wrote, as it does
 /// with the layers of BC 2D arrays. Unsigned BC6H volumes are held as R11G11B10. Applies to
 /// images created from now on.
