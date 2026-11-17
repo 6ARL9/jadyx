@@ -1928,6 +1928,12 @@ void TextureCache<P>::TickAsyncDecode() {
             ++i;
             continue;
         }
+        if (async_decode->cancelled) {
+            // Its slot may hold another image by now.
+            lock.unlock();
+            i = async_decodes.erase(i);
+            continue;
+        }
         Image& image = slot_images[async_decode->image_id];
         auto staging = runtime.UploadStagingBuffer(MapSizeBytes(image));
         std::memcpy(staging.mapped_span.data(), async_decode->decoded_data.data(),
@@ -1935,6 +1941,7 @@ void TextureCache<P>::TickAsyncDecode() {
         image.UploadMemory(staging, FixSmallVectorADL(async_decode->copies));
         image.flags &= ~ImageFlagBits::IsDecoding;
         has_uploads = true;
+        lock.unlock(); // The mutex goes with the context.
         i = async_decodes.erase(i);
     }
     if (has_uploads) {
@@ -3450,6 +3457,11 @@ u64 TextureCache<P>::HostSizeBytes(const ImageBase& image) const noexcept {
 template <class P>
 void TextureCache<P>::DeleteImage(ImageId image_id, bool immediate_delete) {
     ImageBase& image = slot_images[image_id];
+    for (const auto& async_decode : async_decodes) {
+        if (async_decode->image_id == image_id) {
+            async_decode->cancelled = true;
+        }
+    }
     if (AliasCapture::Wants(image)) {
         FullCapture::Event("tc_delete", fmt::format("{{\"image\":{},\"aliases\":{}}}",
                                                     AliasCapture::Describe(image),

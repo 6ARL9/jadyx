@@ -679,6 +679,12 @@ Image::Image(TextureCacheRuntime& runtime_, const VideoCommon::ImageInfo& info_,
     }
     if (format.converted) {
         flags |= VideoCommon::ImageFlagBits::Converted | VideoCommon::ImageFlagBits::CostlyLoad;
+        // Games stream these volumes again on area loads (Metroid Prime Remastered: two
+        // 512x256x368 BC6H light volumes, most of a second to decode even on four cores). On the
+        // texture decoder thread the frame goes on with the previous contents instead of freezing.
+        if (bc_3d) {
+            flags |= VideoCommon::ImageFlagBits::AsynchronousDecode;
+        }
     }
     // Big block-linear color uploads: the CPU copies the guest bytes as they are and a compute
     // shader unswizzles them. Only where the host keeps the guest's texel blocks unchanged.
