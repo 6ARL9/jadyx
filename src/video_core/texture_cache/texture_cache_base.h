@@ -112,6 +112,10 @@ struct AsyncDecodeContext {
     std::atomic_bool complete;
     /// The image was deleted while the worker decoded it: drop the result (GPU thread only).
     bool cancelled{};
+    /// The unswizzled guest blocks the worker decoded, handed back for the next decode.
+    std::vector<u8> input;
+    /// Depth slices already uploaded, for volumes uploaded a few slices per frame.
+    u32 uploaded_slices{};
 };
 
 using TextureCacheGPUMap = ::Common::unordered_map<u64, std::vector<ImageId>, Common::IdentityHash<u64>>;
@@ -709,6 +713,9 @@ private:
     Common::ThreadWorker texture_decode_worker{1, "TextureDecoder", {},
                                                Common::ThreadPlacement::Efficiency};
     std::vector<std::unique_ptr<AsyncDecodeContext>> async_decodes;
+    /// Input buffers of finished asynchronous decodes, reused so a large image's blocks are not
+    /// zero-filled and first touched on the GPU thread at every reload.
+    std::vector<std::vector<u8>> async_decode_inputs;
 
     std::deque<PendingUnswizzle> unswizzle_queue;
     u8 current_unswizzle_frame;

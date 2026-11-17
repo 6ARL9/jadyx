@@ -1875,12 +1875,25 @@ void TextureCache<P>::QueueAsyncDecode(Image& image, ImageId image_id) {
     LOG_INFO(HW_GPU, "Queuing async texture decode");
 
     image.flags |= ImageFlagBits::IsDecoding;
+    // Newer guest data supersedes a decode still running or still uploading its slices: its
+    // older slices must not land after these.
+    for (const auto& pending : async_decodes) {
+        if (pending->image_id == image_id) {
+            pending->cancelled = true;
+        }
+    }
     auto decode = std::make_unique<AsyncDecodeContext>();
     auto* decode_ptr = decode.get();
     decode->image_id = image_id;
     async_decodes.push_back(std::move(decode));
 
-    std::vector<u8> local_unswizzle_data_buffer(image.unswizzled_size_bytes, 0);
+    // A reused buffer: shrinking keeps its capacity and growing zero-fills only the new tail.
+    std::vector<u8> local_unswizzle_data_buffer;
+    if (!async_decode_inputs.empty()) {
+        local_unswizzle_data_buffer = std::move(async_decode_inputs.back());
+        async_decode_inputs.pop_back();
+    }
+    local_unswizzle_data_buffer.resize(image.unswizzled_size_bytes);
     Tegra::Memory::GpuGuestMemory<u8, Tegra::Memory::GuestMemoryFlags::UnsafeRead> swizzle_data(*gpu_memory, image.gpu_addr, image.guest_size_bytes, &swizzle_data_buffer);
     auto copies = UnswizzleImage(*gpu_memory, image.gpu_addr, image.info, swizzle_data, local_unswizzle_data_buffer);
     if constexpr (requires { image.PreserveGuestBlocks(local_unswizzle_data_buffer, copies); }) {
@@ -1898,6 +1911,7 @@ void TextureCache<P>::QueueAsyncDecode(Image& image, ImageId image_id) {
         // TODO: Do we need this lock?
         std::unique_lock lock{async_decode->mutex};
         async_decode->copies = std::move(copies);
+        async_decode->input = std::move(input);
         async_decode->complete = true;
     };
     texture_decode_worker.QueueWork(std::move(func));
@@ -1919,6 +1933,18 @@ void TextureCache<P>::QueueAsyncUnswizzle(Image& image, ImageId image_id) {
 
 template <class P>
 void TextureCache<P>::TickAsyncDecode() {
+    // A decoded volume larger than this goes up a few depth slices per frame through the staging
+    // stream. In one piece it took a dedicated buffer the size of the volume (184 MiB for a
+    // 512x256x368 light volume): creating it and first writing it stalled the frame ~100 ms.
+    constexpr size_t SLICED_UPLOAD_MIN = 32_MiB;
+    constexpr size_t SLICED_UPLOAD_CHUNK = 16_MiB;
+    size_t frame_budget = 32_MiB;
+    // Keeps the input of a finished decode for the next one (two at most, none of them huge).
+    const auto recycle_input = [this](AsyncDecodeContext& async_decode) {
+        if (async_decode_inputs.size() < 2 && async_decode.input.capacity() <= 64_MiB) {
+            async_decode_inputs.push_back(std::move(async_decode.input));
+        }
+    };
     bool has_uploads{};
     auto i = async_decodes.begin();
     while (i != async_decodes.end()) {
@@ -1930,17 +1956,58 @@ void TextureCache<P>::TickAsyncDecode() {
         }
         if (async_decode->cancelled) {
             // Its slot may hold another image by now.
+            recycle_input(*async_decode);
             lock.unlock();
             i = async_decodes.erase(i);
             continue;
         }
         Image& image = slot_images[async_decode->image_id];
-        auto staging = runtime.UploadStagingBuffer(MapSizeBytes(image));
-        std::memcpy(staging.mapped_span.data(), async_decode->decoded_data.data(),
-                    async_decode->decoded_data.size());
-        image.UploadMemory(staging, FixSmallVectorADL(async_decode->copies));
+        const auto& copies = async_decode->copies;
+        const BufferImageCopy* const whole = copies.size() == 1 ? &copies[0] : nullptr;
+        const u32 depth = whole ? whole->image_extent.depth : 0;
+        const size_t level_bytes =
+            whole && async_decode->decoded_data.size() > whole->buffer_offset
+                ? async_decode->decoded_data.size() - whole->buffer_offset
+                : 0;
+        const bool sliced = whole && image.info.type == ImageType::e3D && depth > 1 &&
+                            whole->image_subresource.num_layers == 1 &&
+                            whole->image_offset == Offset3D{} &&
+                            level_bytes >= SLICED_UPLOAD_MIN && level_bytes % depth == 0;
+        if (sliced) {
+            const size_t slice_bytes = level_bytes / depth;
+            const u32 chunk_slices = static_cast<u32>(
+                (std::max<size_t>)(SLICED_UPLOAD_CHUNK / slice_bytes, 1));
+            while (async_decode->uploaded_slices < depth && frame_budget > 0) {
+                const u32 first = async_decode->uploaded_slices;
+                const u32 count = (std::min)(chunk_slices, depth - first);
+                const size_t bytes = slice_bytes * count;
+                auto staging = runtime.UploadStagingBuffer(bytes);
+                std::memcpy(staging.mapped_span.data(),
+                            async_decode->decoded_data.data() + whole->buffer_offset +
+                                slice_bytes * first,
+                            bytes);
+                BufferImageCopy part = *whole;
+                part.buffer_offset = 0;
+                part.image_offset.z = static_cast<s32>(first);
+                part.image_extent.depth = count;
+                image.UploadMemory(staging, std::span<const BufferImageCopy>{&part, 1});
+                async_decode->uploaded_slices += count;
+                frame_budget = bytes >= frame_budget ? 0 : frame_budget - bytes;
+                has_uploads = true;
+            }
+            if (async_decode->uploaded_slices < depth) {
+                ++i; // The rest next frame; the image keeps IsDecoding until then.
+                continue;
+            }
+        } else {
+            auto staging = runtime.UploadStagingBuffer(MapSizeBytes(image));
+            std::memcpy(staging.mapped_span.data(), async_decode->decoded_data.data(),
+                        async_decode->decoded_data.size());
+            image.UploadMemory(staging, FixSmallVectorADL(async_decode->copies));
+            has_uploads = true;
+        }
         image.flags &= ~ImageFlagBits::IsDecoding;
-        has_uploads = true;
+        recycle_input(*async_decode);
         lock.unlock(); // The mutex goes with the context.
         i = async_decodes.erase(i);
     }
