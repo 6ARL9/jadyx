@@ -36,10 +36,10 @@ thread_local bool decoding_slices = false;
 /// SetBcDecodeSingleThreaded: this thread decodes alone (a background decoder).
 thread_local bool single_threaded_decode = false;
 
-/// Calls work(first, count) over the depth slices [0, slices), split across up to
-/// MAX_DECODE_THREADS threads when each gets MIN_TEXELS_PER_DECODE_THREAD texels or more. Slices
-/// of a level are independent, so a large volume (a 512x256x368 light volume takes seconds on one
-/// core) is decoded by idle cores instead of stalling the GPU thread alone.
+/// Calls work(first, count) over the units [0, slices) of a level (depth slices or array layers),
+/// split across up to MAX_DECODE_THREADS threads when each gets MIN_TEXELS_PER_DECODE_THREAD
+/// texels or more. Units are independent, so a large level (a 512x256x368 light volume takes
+/// seconds on one core) is decoded by idle cores instead of stalling the GPU thread alone.
 template <typename Work>
 void ForEachSliceRange(u32 slices, size_t texels_per_slice, const Work& work) {
     u32 threads = 1;
@@ -193,39 +193,39 @@ void DecompressBlocks(std::span<const u8> input, std::span<u8> output, BufferIma
     if (width == 0 || layer_height == 0) {
         return;
     }
-    // A slice holds every layer's block rows in the input and every layer's texel rows in the
-    // output, so each slice's offsets follow from its index.
+    // A unit is one layer of one depth slice: its rows of blocks in the input and its texel rows
+    // in the output, so each unit's offsets follow from its index (slices outermost, as the guest
+    // lays them out). Units are independent: large arrays (a 2888x2888 four-layer BC6H array took
+    // over a second on one core) and volumes are split across threads.
     const u32 block_rows = (layer_height + layer_block_height - 1) / layer_block_height;
-    const size_t input_slice = static_cast<size_t>(layers) * block_rows * input_row_pitch;
-    const size_t output_slice = static_cast<size_t>(layers) * layer_height * pitch;
-    const auto decode_slices = [&](u32 first, u32 count) {
-        size_t input_offset = first * input_slice;
-        size_t output_offset = first * output_slice;
-        for (u32 slice = first; slice < first + count; ++slice) {
-            for (u32 layer = 0; layer < layers; ++layer) {
-                for (u32 y = 0; y < layer_height; y += layer_block_height) {
-                    size_t src_offset = input_offset;
-                    size_t dst_offset = output_offset;
-                    for (u32 x = 0; x < width; x += block_width) {
-                        const u8* src = input.data() + src_offset;
-                        u8* const dst = output.data() + dst_offset;
-                        if constexpr (IsSigned(pixel_format)) {
-                            decompress(src, dst, x, y, width, layer_height, is_signed);
-                        } else {
-                            decompress(src, dst, x, y, width, layer_height);
-                        }
-                        src_offset += block_size;
-                        dst_offset += block_width * out_bpp;
+    const size_t input_unit = static_cast<size_t>(block_rows) * input_row_pitch;
+    const size_t output_unit = static_cast<size_t>(layer_height) * pitch;
+    const auto decode_units = [&](u32 first, u32 count) {
+        size_t input_offset = first * input_unit;
+        size_t output_offset = first * output_unit;
+        for (u32 unit = first; unit < first + count; ++unit) {
+            for (u32 y = 0; y < layer_height; y += layer_block_height) {
+                size_t src_offset = input_offset;
+                size_t dst_offset = output_offset;
+                for (u32 x = 0; x < width; x += block_width) {
+                    const u8* src = input.data() + src_offset;
+                    u8* const dst = output.data() + dst_offset;
+                    if constexpr (IsSigned(pixel_format)) {
+                        decompress(src, dst, x, y, width, layer_height, is_signed);
+                    } else {
+                        decompress(src, dst, x, y, width, layer_height);
                     }
-                    input_offset += input_row_pitch;
-                    output_offset += static_cast<size_t>(
-                                         (std::min)(layer_block_height, layer_height - y)) *
-                                     pitch;
+                    src_offset += block_size;
+                    dst_offset += block_width * out_bpp;
                 }
+                input_offset += input_row_pitch;
+                output_offset += static_cast<size_t>(
+                                     (std::min)(layer_block_height, layer_height - y)) *
+                                 pitch;
             }
         }
     };
-    ForEachSliceRange(depth, static_cast<size_t>(width) * layer_height * layers, decode_slices);
+    ForEachSliceRange(depth * layers, static_cast<size_t>(width) * layer_height, decode_units);
 }
 
 void SetBcGuestPalette(bool enabled) noexcept {
