@@ -4,10 +4,15 @@
 // SPDX-FileCopyrightText: Copyright 2018 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <algorithm>
 #include <array>
+#include <atomic>
 #include <cmath>
 #include <cstring>
 #include <span>
+#include <system_error>
+#include <thread>
+#include <vector>
 
 #include "common/alignment.h"
 #include "common/assert.h"
@@ -38,7 +43,8 @@ void incrpdep(u32& value) {
 
 template <bool TO_LINEAR, u32 BYTES_PER_PIXEL>
 void SwizzleImpl(std::span<u8> output, std::span<const u8> input, u32 width, u32 height, u32 depth,
-                 u32 block_height, u32 block_depth, u32 stride, u32 linear_pitch) {
+                 u32 block_height, u32 block_depth, u32 stride, u32 linear_pitch, u32 first_row,
+                 u32 num_rows) {
     // The origin of the transformation can be configured here, leave it as zero as the current API
     // doesn't expose it.
     static constexpr u32 origin_x = 0;
@@ -57,11 +63,20 @@ void SwizzleImpl(std::span<u8> output, std::span<const u8> input, u32 width, u32
     const u32 block_depth_mask = (1U << block_depth) - 1;
     const u32 x_shift = GOB_SIZE_SHIFT + block_height + block_depth;
 
-    for (u32 slice = 0; slice < depth; ++slice) {
+    // Rows of every slice in turn ([first_row, first_row + num_rows) of depth * height), each
+    // independent of the others, so a large image can be split across threads.
+    if (height == 0 || num_rows == 0) {
+        return;
+    }
+    const u32 end_row = first_row + num_rows;
+    for (u32 slice = first_row / height; slice < depth && slice * height < end_row; ++slice) {
         const u32 z = slice + origin_z;
         const u32 offset_z = (z >> block_depth) * slice_size +
                              ((z & block_depth_mask) << (GOB_SIZE_SHIFT + block_height));
-        for (u32 line = 0; line < height; ++line) {
+        const u32 slice_first = slice * height;
+        const u32 line_begin = first_row > slice_first ? first_row - slice_first : 0;
+        const u32 line_end = (std::min)(height, end_row - slice_first);
+        for (u32 line = line_begin; line < line_end; ++line) {
             const u32 y = line + origin_y;
             const u32 swizzled_y = pdep<SWIZZLE_Y_BITS>(y);
 
@@ -168,12 +183,13 @@ void SwizzleSubrectImpl(std::span<u8> output, std::span<const u8> input, u32 wid
 template <bool TO_LINEAR>
 void Swizzle(std::span<u8> output, std::span<const u8> input, u32 bytes_per_pixel, u32 width,
              u32 height, u32 depth, u32 block_height, u32 block_depth, u32 stride_alignment,
-             u32 linear_pitch) {
+             u32 linear_pitch, u32 first_row, u32 num_rows) {
     switch (bytes_per_pixel) {
 #define BPP_CASE(x)                                                                                \
     case x:                                                                                        \
         return SwizzleImpl<TO_LINEAR, x>(output, input, width, height, depth, block_height,        \
-                                         block_depth, stride_alignment, linear_pitch);
+                                         block_depth, stride_alignment, linear_pitch, first_row,   \
+                                         num_rows);
         BPP_CASE(1)
         BPP_CASE(2)
         BPP_CASE(3)
@@ -189,6 +205,14 @@ void Swizzle(std::span<u8> output, std::span<const u8> input, u32 bytes_per_pixe
     }
 }
 
+/// Bytes a helper thread needs to be worth starting, and the most threads one image gets.
+constexpr size_t MIN_BYTES_PER_SWIZZLE_THREAD = size_t{2} << 20;
+constexpr size_t MAX_SWIZZLE_THREADS = 4;
+/// boot.cfg "parallel_unswizzle=0" turns the split off.
+std::atomic<bool> parallel_unswizzle{true};
+/// SetSwizzleSingleThreaded: this thread unswizzles alone (a background decoder).
+thread_local bool single_threaded_swizzle = false;
+
 } // Anonymous namespace
 
 void UnswizzleTexture(std::span<u8> output, std::span<const u8> input, u32 bytes_per_pixel,
@@ -198,8 +222,52 @@ void UnswizzleTexture(std::span<u8> output, std::span<const u8> input, u32 bytes
     const u32 new_bpp = (std::min)(4U, static_cast<u32>(std::countr_zero(width * bytes_per_pixel)));
     width = (width * bytes_per_pixel) >> new_bpp;
     bytes_per_pixel = 1U << new_bpp;
-    Swizzle<false>(output, input, bytes_per_pixel, width, height, depth, block_height, block_depth,
-                   stride, linear_pitch);
+    const u32 rows = height * depth;
+    const auto run = [&](u32 first_row, u32 num_rows) {
+        Swizzle<false>(output, input, bytes_per_pixel, width, height, depth, block_height,
+                       block_depth, stride, linear_pitch, first_row, num_rows);
+    };
+    // A large image is split by rows across idle cores: on an area load the GPU thread
+    // unswizzled a few large textures alone for 250 to 350 ms while the game waited for it.
+    const size_t bytes = static_cast<size_t>(width) * bytes_per_pixel * rows;
+    u32 threads = 1;
+    if (parallel_unswizzle.load(std::memory_order_relaxed) && !single_threaded_swizzle &&
+        rows > 1) {
+        threads = static_cast<u32>((std::min<size_t>)(bytes / MIN_BYTES_PER_SWIZZLE_THREAD,
+                                                      MAX_SWIZZLE_THREADS));
+        threads = (std::min)({threads, (std::max)(std::thread::hardware_concurrency(), 1u), rows});
+        threads = (std::max)(threads, 1u);
+    }
+    if (threads == 1) {
+        run(0, rows);
+        return;
+    }
+    const u32 per_thread = (rows + threads - 1) / threads;
+    std::vector<std::thread> helpers;
+    helpers.reserve(threads - 1);
+    u32 first = per_thread;
+    for (; first < rows; first += per_thread) {
+        try {
+            helpers.emplace_back(run, first, (std::min)(per_thread, rows - first));
+        } catch (const std::system_error&) {
+            break; // No thread: this one unswizzles the rest below.
+        }
+    }
+    run(0, (std::min)(per_thread, rows));
+    for (; first < rows; first += per_thread) {
+        run(first, (std::min)(per_thread, rows - first));
+    }
+    for (std::thread& helper : helpers) {
+        helper.join();
+    }
+}
+
+void SetParallelUnswizzle(bool enabled) noexcept {
+    parallel_unswizzle.store(enabled, std::memory_order_relaxed);
+}
+
+void SetSwizzleSingleThreaded(bool single) noexcept {
+    single_threaded_swizzle = single;
 }
 
 void SwizzleTexture(std::span<u8> output, std::span<const u8> input, u32 bytes_per_pixel, u32 width,
@@ -210,7 +278,7 @@ void SwizzleTexture(std::span<u8> output, std::span<const u8> input, u32 bytes_p
     width = (width * bytes_per_pixel) >> new_bpp;
     bytes_per_pixel = 1U << new_bpp;
     Swizzle<true>(output, input, bytes_per_pixel, width, height, depth, block_height, block_depth,
-                  stride, 0);
+                  stride, 0, 0, height * depth);
 }
 
 void SwizzleSubrect(std::span<u8> output, std::span<const u8> input, u32 bytes_per_pixel, u32 width,

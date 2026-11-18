@@ -1965,6 +1965,7 @@ void TextureCache<P>::QueueAsyncDecode(Image& image, ImageId image_id) {
             // core, below the emulated ones.
             Common::SetCurrentThreadPriority(Common::ThreadPriority::Low);
             SetBcDecodeSingleThreaded(true);
+            Tegra::Texture::SetSwizzleSingleThreaded(true);
             guest.resize(guest_size);
             {
                 u8* out = guest.data();
@@ -2053,6 +2054,7 @@ void TextureCache<P>::QueueAsyncDecode(Image& image, ImageId image_id) {
                  async_decode = decode_ptr]() mutable {
         Common::SetCurrentThreadPriority(Common::ThreadPriority::Low);
         SetBcDecodeSingleThreaded(true);
+        Tegra::Texture::SetSwizzleSingleThreaded(true);
         async_decode->decoded_data.resize_destructive(out_size);
         std::span copies_span{copies.data(), copies.size()};
         ConvertImage(input, info, async_decode->decoded_data, copies_span);

@@ -129,3 +129,7 @@ void SetRenderTargetInheritance(bool enabled) noexcept; // texture_cache/texture
 void SetReclaimSupersededImages(bool enabled) noexcept; // texture_cache/texture_cache_base.h
 void SetRenderTargetEarlyOut(bool enabled) noexcept;   // texture_cache/texture_cache_base.h
 } // namespace VideoCommon
+
+namespace Tegra::Texture {
+void SetParallelUnswizzle(bool enabled) noexcept; // video_core/textures/decoders.h
+} // namespace Tegra::Texture

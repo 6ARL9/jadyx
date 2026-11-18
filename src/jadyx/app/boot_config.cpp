@@ -415,6 +415,12 @@ void ParseBootConfigFile(const std::string& install_path, BootConfig& config) {
                                                     : "stay compressed"));
                 continue;
             }
+            if (line == "parallel_unswizzle=0" || line == "parallel_unswizzle=1") {
+                config.parallel_unswizzle = line.back() == '1';
+                WriteDiag(std::string{"boot.cfg: large texture unswizzles "} +
+                          (config.parallel_unswizzle ? "split across threads" : "on one thread"));
+                continue;
+            }
             if (line == "texture_remap=0" || line == "texture_remap=1") {
                 config.texture_remap = line.back() == '1';
                 WriteDiag(std::string{"boot.cfg: texture_remap "} +
