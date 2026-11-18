@@ -18,6 +18,7 @@
 #include <unordered_map>
 #include "common/container/unordered_map.h"
 #include "common/container/unordered_set.h"
+#include <utility>
 #include <vector>
 #include <boost/container/small_vector.hpp>
 #include <boost/container/static_vector.hpp>
@@ -125,6 +126,8 @@ struct AsyncDecodeContext {
         std::vector<u8> data;
     };
     bool streaming{};
+    bool unchanged{}; ///< The guest bytes hash as the last decode's: nothing to upload (mutex).
+    u64 hash{};       ///< Hash of the guest bytes this decode read (mutex).
     BufferImageCopy stream_copy{}; ///< The whole level as uploaded (tight rows, offset 0).
     std::deque<Chunk> ready_chunks;               ///< Decoded, waiting for upload (mutex).
     std::atomic_bool stop{}; ///< Cancelled: the worker decodes no further chunk.
@@ -722,8 +725,6 @@ private:
     u64 churn_window_start = 0;
     u64 live_report_bytes = 0;
 
-    Common::ThreadWorker texture_decode_worker{1, "TextureDecoder", {},
-                                               Common::ThreadPlacement::Efficiency};
     std::vector<std::unique_ptr<AsyncDecodeContext>> async_decodes;
     /// Input buffers of finished asynchronous decodes, reused so a large image's blocks are not
     /// zero-filled and first touched on the GPU thread at every reload.
@@ -732,6 +733,16 @@ private:
     /// already touched (the TextureDecoder thread takes, the GPU thread gives back).
     std::mutex decode_chunk_mutex;
     std::vector<std::vector<u8>> decode_chunk_pool;
+    /// The unswizzled blocks of the volume being decoded (TextureDecoder thread only).
+    std::vector<u8> async_unswizzle_scratch;
+    /// Hash of the guest bytes each streamed image was last decoded from: a refresh with the same
+    /// bytes uploads nothing (GPU thread only).
+    std::vector<std::pair<ImageId, u64>> async_decode_hashes;
+    /// Streamed decodes finished, found unchanged, cancelled, and refreshes put off (diagnostics).
+    std::array<u32, 4> async_decode_stats{};
+    /// After everything its tasks use, so it stops before they are destroyed.
+    Common::ThreadWorker texture_decode_worker{1, "TextureDecoder", {},
+                                               Common::ThreadPlacement::Efficiency};
 
     std::deque<PendingUnswizzle> unswizzle_queue;
     u8 current_unswizzle_frame;

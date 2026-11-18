@@ -34,6 +34,7 @@
 #include "video_core/texture_cache/image_view_base.h"
 #include "video_core/texture_cache/samples_helper.h"
 #include "video_core/texture_cache/texture_cache_base.h"
+#include "common/cityhash.h"
 #include "common/thread.h"
 #include "video_core/texture_cache/decode_bc.h"
 #include "video_core/texture_cache/util.h"
@@ -1571,6 +1572,14 @@ void TextureCache<P>::RefreshContents(Image& image, ImageId image_id) {
         // Only upload modified images
         return;
     }
+    if (True(image.flags & ImageFlagBits::AsynchronousDecode) &&
+        True(image.flags & ImageFlagBits::IsDecoding)) {
+        // The guest wrote again while older contents still decode (a game streaming a volume in
+        // pieces sends it several times a second). Restarting on every write never finishes and
+        // repeats the read; the image stays CpuModified and is refreshed once that decode is in.
+        ++async_decode_stats[3];
+        return;
+    }
 
     const VideoCore::FrameTrace::ScopedSpan trace_upload{
         VideoCore::FrameTrace::Event::TextureUploadLong, image.gpu_addr};
@@ -1896,49 +1905,81 @@ void TextureCache<P>::QueueAsyncDecode(Image& image, ImageId image_id) {
         local_unswizzle_data_buffer = std::move(async_decode_inputs.back());
         async_decode_inputs.pop_back();
     }
-    local_unswizzle_data_buffer.resize(image.unswizzled_size_bytes);
-    Tegra::Memory::GpuGuestMemory<u8, Tegra::Memory::GuestMemoryFlags::UnsafeRead> swizzle_data(*gpu_memory, image.gpu_addr, image.guest_size_bytes, &swizzle_data_buffer);
-    auto copies = UnswizzleImage(*gpu_memory, image.gpu_addr, image.info, swizzle_data, local_unswizzle_data_buffer);
-    if constexpr (requires { image.PreserveGuestBlocks(local_unswizzle_data_buffer, copies); }) {
-        image.PreserveGuestBlocks(local_unswizzle_data_buffer, copies);
-    }
-    // A large BC volume decodes a few slices at a time: the GPU thread uploads each chunk as it
-    // comes and hands its buffer back, so the decoded volume (184 MiB for a 512x256x368 light
-    // volume) never sits in memory whole. Two of them at once pushed a game near its memory limit
-    // into paging its RAM out on area loads.
+
+    // A large BC volume is streamed: the GPU thread only copies the guest bytes; the worker
+    // unswizzles them and decodes a few slices at a time, and the GPU thread uploads each chunk
+    // as it comes and hands its buffer back. The decoded volume (184 MiB for a 512x256x368 light
+    // volume) never sits in memory whole, and bytes that hash as the last decode's upload nothing.
     constexpr size_t STREAMED_DECODE_MIN = 32_MiB;
     constexpr size_t STREAMED_DECODE_CHUNK = 8_MiB;
     const bool stream =
         IsPixelFormatBCn(image.info.format) && image.info.type == ImageType::e3D &&
-        image.info.resources.levels == 1 && copies.size() == 1 &&
-        copies[0].image_subresource.num_layers <= 1 && copies[0].image_extent.depth > 1 &&
-        copies[0].image_offset == Offset3D{} &&
-        DecodedBcSliceBytes(copies[0], image.info.format, image.info.type) *
-                copies[0].image_extent.depth >=
-            STREAMED_DECODE_MIN;
+        image.info.resources.levels == 1 && image.info.resources.layers == 1 &&
+        image.info.size.depth > 1 && image.converted_size_bytes >= STREAMED_DECODE_MIN;
     if (stream) {
-        const BufferImageCopy copy = copies[0];
-        BufferImageCopy upload = copy;
-        upload.buffer_offset = 0;
-        upload.buffer_row_length = copy.image_extent.width;
-        upload.buffer_image_height = copy.image_extent.height;
+        local_unswizzle_data_buffer.resize(image.guest_size_bytes);
+        gpu_memory->ReadBlockUnsafe(image.gpu_addr, local_unswizzle_data_buffer.data(),
+                                    image.guest_size_bytes);
+        std::optional<u64> previous_hash;
+        if (False(image.flags & ImageFlagBits::GpuModified)) {
+            for (const auto& [id, hash] : async_decode_hashes) {
+                if (id == image_id) {
+                    previous_hash = hash;
+                }
+            }
+        }
         decode_ptr->streaming = true;
-        decode_ptr->stream_copy = upload;
-        const size_t slice_bytes = DecodedBcSliceBytes(copy, image.info.format, image.info.type);
-        const u32 chunk_slices =
-            static_cast<u32>((std::max<size_t>)(STREAMED_DECODE_CHUNK / slice_bytes, 1));
-        auto stream_func = [copy, info = image.info, slice_bytes, chunk_slices,
-                            input = std::move(local_unswizzle_data_buffer),
-                            async_decode = decode_ptr, pool = &decode_chunk_pool,
+        auto stream_func = [info = image.info, gpu_addr = image.gpu_addr, previous_hash,
+                            unswizzled_size = image.unswizzled_size_bytes,
+                            guest = std::move(local_unswizzle_data_buffer),
+                            async_decode = decode_ptr, memory = gpu_memory,
+                            scratch = &async_unswizzle_scratch, pool = &decode_chunk_pool,
                             pool_mutex = &decode_chunk_mutex]() mutable {
             // In the background the decode need not be fast, only out of the game's way: one
             // core, below the emulated ones.
             Common::SetCurrentThreadPriority(Common::ThreadPriority::Low);
             SetBcDecodeSingleThreaded(true);
-            const std::span<const u8> blocks = std::span<const u8>{input}.subspan(copy.buffer_offset);
+            const auto finish = [&](bool unchanged, u64 hash) {
+                std::scoped_lock lock{async_decode->mutex};
+                async_decode->unchanged = unchanged;
+                async_decode->hash = hash;
+                async_decode->input = std::move(guest);
+                async_decode->complete = true;
+            };
+            const u64 hash =
+                Common::CityHash64(reinterpret_cast<const char*>(guest.data()), guest.size());
+            if (previous_hash && *previous_hash == hash) {
+                finish(true, hash);
+                return;
+            }
+            scratch->resize(unswizzled_size);
+            // Block-linear images are unswizzled from the bytes alone; the memory manager is only
+            // read for pitch-linear ones, which are never streamed.
+            const auto copies = UnswizzleImage(*memory, gpu_addr, info, guest, *scratch);
+            if (copies.size() != 1 || copies[0].image_subresource.num_layers > 1 ||
+                copies[0].image_extent.depth <= 1) {
+                finish(true, hash); // Not the shape promised: leave the image as it is.
+                return;
+            }
+            const BufferImageCopy copy = copies[0];
+            {
+                BufferImageCopy upload = copy;
+                upload.buffer_offset = 0;
+                upload.buffer_row_length = copy.image_extent.width;
+                upload.buffer_image_height = copy.image_extent.height;
+                std::scoped_lock lock{async_decode->mutex};
+                async_decode->stream_copy = upload;
+            }
+            const size_t slice_bytes = DecodedBcSliceBytes(copy, info.format, info.type);
+            const u32 chunk_slices =
+                static_cast<u32>((std::max<size_t>)(STREAMED_DECODE_CHUNK / slice_bytes, 1));
+            const std::span<const u8> blocks =
+                std::span<const u8>{*scratch}.subspan(copy.buffer_offset);
             const u32 depth = copy.image_extent.depth;
+            bool stopped = false;
             for (u32 first = 0; first < depth; first += chunk_slices) {
                 if (async_decode->stop.load(std::memory_order_relaxed)) {
+                    stopped = true;
                     break;
                 }
                 const u32 count = (std::min)(chunk_slices, depth - first);
@@ -1955,14 +1996,18 @@ void TextureCache<P>::QueueAsyncDecode(Image& image, ImageId image_id) {
                 std::scoped_lock lock{async_decode->mutex};
                 async_decode->ready_chunks.push_back({first, count, std::move(data)});
             }
-            std::scoped_lock lock{async_decode->mutex};
-            async_decode->input = std::move(input);
-            async_decode->complete = true;
+            finish(false, stopped ? 0 : hash);
         };
         texture_decode_worker.QueueWork(std::move(stream_func));
         return;
     }
 
+    local_unswizzle_data_buffer.resize(image.unswizzled_size_bytes);
+    Tegra::Memory::GpuGuestMemory<u8, Tegra::Memory::GuestMemoryFlags::UnsafeRead> swizzle_data(*gpu_memory, image.gpu_addr, image.guest_size_bytes, &swizzle_data_buffer);
+    auto copies = UnswizzleImage(*gpu_memory, image.gpu_addr, image.info, swizzle_data, local_unswizzle_data_buffer);
+    if constexpr (requires { image.PreserveGuestBlocks(local_unswizzle_data_buffer, copies); }) {
+        image.PreserveGuestBlocks(local_unswizzle_data_buffer, copies);
+    }
     const size_t out_size = MapSizeBytes(image);
 
     auto func = [out_size, copies, info = image.info,
@@ -2050,6 +2095,20 @@ void TextureCache<P>::TickAsyncDecode() {
             }
             if (!async_decode->cancelled) {
                 slot_images[async_decode->image_id].flags &= ~ImageFlagBits::IsDecoding;
+                const ImageId id = async_decode->image_id;
+                std::erase_if(async_decode_hashes,
+                              [id](const auto& entry) { return entry.first == id; });
+                async_decode_hashes.emplace_back(id, async_decode->hash);
+            }
+            ++async_decode_stats[async_decode->cancelled ? 2 : async_decode->unchanged ? 1 : 0];
+            if (const u32 total = async_decode_stats[0] + async_decode_stats[1] +
+                                  async_decode_stats[2];
+                total <= 8 || total % 8 == 0) {
+                LOG_INFO(HW_GPU,
+                         "Streamed BC volume decodes: {} uploaded, {} unchanged, {} cancelled; "
+                         "{} refreshes put off while one ran",
+                         async_decode_stats[0], async_decode_stats[1], async_decode_stats[2],
+                         async_decode_stats[3]);
             }
             recycle_input(*async_decode);
             lock.unlock(); // The mutex goes with the context.
@@ -3636,6 +3695,8 @@ void TextureCache<P>::DeleteImage(ImageId image_id, bool immediate_delete) {
             async_decode->stop = true;
         }
     }
+    std::erase_if(async_decode_hashes,
+                  [image_id](const auto& entry) { return entry.first == image_id; });
     if (AliasCapture::Wants(image)) {
         FullCapture::Event("tc_delete", fmt::format("{{\"image\":{},\"aliases\":{}}}",
                                                     AliasCapture::Describe(image),
