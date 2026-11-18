@@ -1917,9 +1917,33 @@ void TextureCache<P>::QueueAsyncDecode(Image& image, ImageId image_id) {
         image.info.resources.levels == 1 && image.info.resources.layers == 1 &&
         image.info.size.depth > 1 && image.converted_size_bytes >= STREAMED_DECODE_MIN;
     if (stream) {
-        local_unswizzle_data_buffer.resize(image.guest_size_bytes);
-        gpu_memory->ReadBlockUnsafe(image.gpu_addr, local_unswizzle_data_buffer.data(),
-                                    image.guest_size_bytes);
+        // Only where the bytes are is worked out here, page by page (cheap); the worker copies
+        // them. Copying 46 MiB per light volume on the GPU thread cost ~50 ms at each area load.
+        // A guest write during the copy marks the image CpuModified again (it is tracked), so a
+        // torn read is replaced by the next refresh.
+        struct GuestRange {
+            DAddr address; ///< 0: unmapped, read as zeros.
+            size_t size;
+        };
+        std::vector<GuestRange> ranges;
+        {
+            constexpr size_t PAGE = Core::DEVICE_PAGESIZE;
+            const GPUVAddr begin = image.gpu_addr;
+            const GPUVAddr end = begin + image.guest_size_bytes;
+            for (GPUVAddr address = begin; address < end;) {
+                const size_t size = (std::min<size_t>)(
+                    PAGE - (address & (PAGE - 1)), static_cast<size_t>(end - address));
+                const std::optional<DAddr> device = gpu_memory->GpuToCpuAddress(address);
+                const DAddr where = device ? *device : 0;
+                if (!ranges.empty() && (ranges.back().address == 0) == (where == 0) &&
+                    (where == 0 || ranges.back().address + ranges.back().size == where)) {
+                    ranges.back().size += size;
+                } else {
+                    ranges.push_back({where, size});
+                }
+                address += size;
+            }
+        }
         std::optional<u64> previous_hash;
         if (False(image.flags & ImageFlagBits::GpuModified)) {
             for (const auto& [id, hash] : async_decode_hashes) {
@@ -1931,14 +1955,28 @@ void TextureCache<P>::QueueAsyncDecode(Image& image, ImageId image_id) {
         decode_ptr->streaming = true;
         auto stream_func = [info = image.info, gpu_addr = image.gpu_addr, previous_hash,
                             unswizzled_size = image.unswizzled_size_bytes,
+                            guest_size = image.guest_size_bytes, ranges = std::move(ranges),
                             guest = std::move(local_unswizzle_data_buffer),
                             async_decode = decode_ptr, memory = gpu_memory,
-                            scratch = &async_unswizzle_scratch, pool = &decode_chunk_pool,
+                            device = &device_memory, scratch = &async_unswizzle_scratch,
+                            pool = &decode_chunk_pool,
                             pool_mutex = &decode_chunk_mutex]() mutable {
             // In the background the decode need not be fast, only out of the game's way: one
             // core, below the emulated ones.
             Common::SetCurrentThreadPriority(Common::ThreadPriority::Low);
             SetBcDecodeSingleThreaded(true);
+            guest.resize(guest_size);
+            {
+                u8* out = guest.data();
+                for (const GuestRange& range : ranges) {
+                    if (range.address == 0) {
+                        std::memset(out, 0, range.size);
+                    } else {
+                        device->ReadBlockUnsafe(range.address, out, range.size);
+                    }
+                    out += range.size;
+                }
+            }
             const auto finish = [&](bool unchanged, u64 hash) {
                 std::scoped_lock lock{async_decode->mutex};
                 async_decode->unchanged = unchanged;
