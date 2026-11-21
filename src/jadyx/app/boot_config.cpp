@@ -426,6 +426,12 @@ void ParseBootConfigFile(const std::string& install_path, BootConfig& config) {
                                                     : "stay compressed"));
                 continue;
             }
+            if (line == "keep_large_staging=0" || line == "keep_large_staging=1") {
+                config.keep_large_staging = line.back() == '1';
+                WriteDiag(std::string{"boot.cfg: one large staging upload buffer "} +
+                          (config.keep_large_staging ? "kept across frames" : "not kept"));
+                continue;
+            }
             if (line == "parallel_unswizzle=0" || line == "parallel_unswizzle=1") {
                 config.parallel_unswizzle = line.back() == '1';
                 WriteDiag(std::string{"boot.cfg: large texture unswizzles "} +

@@ -59,6 +59,7 @@ void SetSmallTextureAlignment(bool enabled); // d3d12_resource_allocator.h
 void SetSpareHeaps(bool enabled); // d3d12_resource_allocator.h
 void SetPsoBlobs(bool enabled); // d3d12_pso_blob_cache.h
 void SetCachedStaging(bool enabled); // d3d12_staging_buffer_pool.h
+void SetKeepLargeStaging(bool enabled); // d3d12_staging_buffer_pool.h
 void SetCpuTextureWrites(bool enabled); // d3d12_resource_allocator.h
 void SetAstcGpuVerify(bool enabled); // d3d12_texture_cache.h
 void SetStencilBlitVerify(bool enabled); // d3d12_texture_cache.h

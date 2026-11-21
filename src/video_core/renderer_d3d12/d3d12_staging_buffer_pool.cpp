@@ -40,6 +40,14 @@ constexpr u64 WAIT_FOR_STREAM_SIZE = 1_MiB;
 /// pressure level.
 constexpr u64 LARGE_RELEASE_FREE = 768_MiB;
 constexpr size_t LARGE_RELEASE_LEVEL = 23;
+/// One retired upload buffer of up to this size is kept across frames. Metroid Prime Remastered
+/// uploads a 35 MiB texture at every area load; with the buffer released in between, each load
+/// created a new 36 MiB buffer and first-touched it, about 9,000 page faults in the frame.
+constexpr u64 KEPT_LARGE_UPLOAD_MAX = 64_MiB;
+/// Below this much free memory nothing is kept: the buffer goes back like the others.
+constexpr u64 KEPT_LARGE_UPLOAD_FREE = 448_MiB;
+
+std::atomic<bool> keep_large_staging{true};
 
 std::atomic<bool> cached_staging{false};
 std::atomic<u64> cached_buffers{0};
@@ -95,6 +103,10 @@ ComPtr<ID3D12Resource> CreateCachedUpload(ID3D12Device* device, u64 size,
 }
 
 } // Anonymous namespace
+
+void SetKeepLargeStaging(bool enabled) {
+    keep_large_staging.store(enabled, std::memory_order_relaxed);
+}
 
 void SetCachedStaging(bool enabled) {
     cached_staging.store(enabled && !cached_refused.load(std::memory_order_relaxed),
@@ -188,7 +200,7 @@ void StagingBufferPool::FreeDeferred(StagingBufferRef& ref) {
 
 void StagingBufferPool::TickFrame() {
     current_delete_level = (current_delete_level + 1) % NUM_LEVELS;
-    ReleaseLevel(upload_cache, current_delete_level);
+    ReleaseLevel(upload_cache, current_delete_level, 16, KeptLargeUpload());
     // Readbacks have no ring: releasing them made the next one a committed resource again, about
     // 2 a second while the camera turned, each a graphics kernel call with the cache locks held.
     // Keep a working set; pressure still releases all of them (ReleaseRetiredDownloads).
@@ -206,6 +218,9 @@ void StagingBufferPool::TickFrame() {
 
 bool StagingBufferPool::GuardMemory(const CacheMemorySnapshot& snapshot) {
     headroom.Measured(snapshot.app_used, snapshot.app_limit);
+    if (snapshot.app_limit != 0) {
+        last_app_free = snapshot.AppFree();
+    }
     const auto plan = ring_guard.BeginFrame(snapshot.app_used, snapshot.app_limit,
                                             stream_buffer ? stream_buffer_size : 0);
     if (plan.target != plan.previous_target) {
@@ -254,9 +269,10 @@ bool StagingBufferPool::GuardMemory(const CacheMemorySnapshot& snapshot) {
     // for their level's turn in the per-frame sweep, up to NUM_LEVELS frames: four of them created
     // within a second of an area load stacked 280 MiB of retired staging into an out-of-memory.
     // Under pressure they go back as soon as the GPU is done with them.
+    const ID3D12Resource* const keep = plan.emergency ? nullptr : KeptLargeUpload();
     if (snapshot.app_limit != 0 && snapshot.AppFree() <= LARGE_RELEASE_FREE) {
         for (size_t level = LARGE_RELEASE_LEVEL; level < NUM_LEVELS; ++level) {
-            ReleaseLevel(upload_cache, level);
+            ReleaseLevel(upload_cache, level, 16, keep);
             ReleaseLevel(download_cache, level);
         }
     }
@@ -265,7 +281,7 @@ bool StagingBufferPool::GuardMemory(const CacheMemorySnapshot& snapshot) {
         // emergency). ReleaseLevel checks fence completion and pinned ownership, allocating nothing.
         for (unsigned i = 0; i < (plan.emergency ? NUM_LEVELS : 4); ++i) {
             const auto level = NUM_LEVELS - 1 - guard_trim_cursor++ % NUM_LEVELS;
-            ReleaseLevel(upload_cache, level);
+            ReleaseLevel(upload_cache, level, 16, keep);
             ReleaseLevel(download_cache, level);
         }
     }
@@ -492,19 +508,37 @@ StagingBufferPool::StagingBuffersCache& StagingBufferPool::GetCache(MemoryUsage 
 }
 
 void StagingBufferPool::ReleaseLevel(StagingBuffersCache& cache, size_t log2,
-                                     size_t max_checks) {
+                                     size_t max_checks, const ID3D12Resource* keep) {
     auto& staging = cache[log2];
     if (staging.entries.empty()) {
         return;
     }
     const u64 completed = scheduler.KnownGpuTick();
     if (ReclaimRetiredStaging(staging.entries, staging.delete_index,
-                             [completed](const StagingBuffer& entry) {
-                                 return !entry.deferred && entry.tick <= completed;
+                             [completed, keep](const StagingBuffer& entry) {
+                                 return !entry.deferred && entry.tick <= completed &&
+                                        (keep == nullptr || entry.buffer.Get() != keep);
                              },
                              max_checks)) {
         staging.iterate_index = 0;
     }
+}
+
+const ID3D12Resource* StagingBufferPool::KeptLargeUpload() const {
+    if (!keep_large_staging.load(std::memory_order_relaxed) ||
+        last_app_free < KEPT_LARGE_UPLOAD_FREE) {
+        return nullptr;
+    }
+    const StagingBuffer* kept = nullptr;
+    for (size_t level = LARGE_RELEASE_LEVEL; level < NUM_LEVELS; ++level) {
+        for (const StagingBuffer& entry : upload_cache[level].entries) {
+            if (!entry.deferred && entry.mapped_span.size() <= KEPT_LARGE_UPLOAD_MAX &&
+                (kept == nullptr || entry.tick > kept->tick)) {
+                kept = &entry;
+            }
+        }
+    }
+    return kept != nullptr ? kept->buffer.Get() : nullptr;
 }
 
 void StagingBufferPool::ReleaseRetiredDownloads() {

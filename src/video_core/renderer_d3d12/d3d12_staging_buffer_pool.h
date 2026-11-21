@@ -5,6 +5,7 @@
 
 #include <array>
 #include <climits>
+#include <limits>
 #include <optional>
 #include <span>
 #include <stdexcept>
@@ -128,7 +129,12 @@ private:
     std::optional<StagingBufferRef> RelieveMemoryPressure(size_t size, MemoryUsage usage,
                                                           bool deferred, bool allocation_failed);
     StagingBuffersCache& GetCache(MemoryUsage usage);
-    void ReleaseLevel(StagingBuffersCache& cache, size_t log2, size_t max_checks = 16);
+    /// Releases retired buffers of one level, but never `keep` (KeptLargeUpload).
+    void ReleaseLevel(StagingBuffersCache& cache, size_t log2, size_t max_checks = 16,
+                      const ID3D12Resource* keep = nullptr);
+    /// The one large retired upload buffer kept across frames, or null: the most recently used one
+    /// of 8 to 64 MiB, while the app has KEPT_LARGE_UPLOAD_FREE free or more.
+    [[nodiscard]] const ID3D12Resource* KeptLargeUpload() const;
     void ReleaseAllRetired(StagingBuffersCache& cache);
     void MeasureHeadroom();
 
@@ -158,6 +164,8 @@ private:
     StagingBuffersCache download_cache;
 
     size_t current_delete_level = 0;
+    /// Free app memory at the last GuardMemory (all of it until the first one).
+    u64 last_app_free = std::numeric_limits<u64>::max();
     u64 unique_ids{};
     u64 pending_tick{};
     u64 pending_upload_bytes{};
@@ -174,6 +182,9 @@ struct StagingOutOfMemory : std::runtime_error {
 /// cache-coherent UMA the GPU reads write-back memory as fast. Turned off for good when the driver
 /// refuses such a buffer.
 void SetCachedStaging(bool enabled);
+/// Keeps one large upload buffer across frames instead of creating it again at each area load
+/// (on unless boot.cfg "keep_large_staging=0").
+void SetKeepLargeStaging(bool enabled);
 [[nodiscard]] bool CachedStaging() noexcept;
 
 struct CachedStagingStats {

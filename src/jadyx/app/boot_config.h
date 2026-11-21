@@ -207,6 +207,8 @@ struct BootConfig {
     u8 bc_3d_mode{};
     /// Split large texture unswizzles across helper threads ("parallel_unswizzle=0" turns it off).
     bool parallel_unswizzle{true};
+    /// Keep one large staging upload buffer across frames ("keep_large_staging=0" turns it off).
+    bool keep_large_staging{true};
     /// Fine per-draw D3D12 CPU timers ("gpu_profile=1"). Off because clock reads are measurable.
     bool gpu_profile{};
     /// Writes every translated guest shader to the dump folder ("dump_guest_shaders=1").
