@@ -249,13 +249,13 @@ void UnswizzleTexture(std::span<u8> output, std::span<const u8> input, u32 bytes
     u32 first = per_thread;
     // The input may be guest memory itself: the helpers are paused, like the GPU thread, while a
     // swapped-out page is filled back in.
-    const auto helper = [&run](u32 first_row, u32 num_rows) {
+    const auto run_helper = [&run](u32 first_row, u32 num_rows) {
         const Common::Permafrost::ScopedMemoryThread memory_thread;
         run(first_row, num_rows);
     };
     for (; first < rows; first += per_thread) {
         try {
-            helpers.emplace_back(helper, first, (std::min)(per_thread, rows - first));
+            helpers.emplace_back(run_helper, first, (std::min)(per_thread, rows - first));
         } catch (const std::system_error&) {
             break; // No thread: this one unswizzles the rest below.
         }

@@ -656,7 +656,7 @@ void RendererD3D12::ReportPerf(double interval_ms) {
              static_cast<double>(memory.Budget) / MIB);
     if (VideoCore::Perf::DetailedGpuProfileEnabled()) {
         LOG_INFO(Render, "Hitch detail: {}", DescribeDrawCosts(delta, interval_ms));
-        const auto ms = [&](Counter counter) { return static_cast<double>(get(counter)) / 1e6; };
+        const auto stage_ms = [&](Counter counter) { return static_cast<double>(get(counter)) / 1e6; };
         LOG_INFO(Render,
                  "Hitch texture uploads: {} ({:.1f} MiB) | read {:.1f} ms / {} faults, unswizzle "
                  "{:.1f} ms / {}, guest blocks kept {:.1f} ms / {}, convert {:.1f} ms / {}, "
@@ -664,13 +664,13 @@ void RendererD3D12::ReportPerf(double interval_ms) {
                  "MiB)",
                  get(Counter::TextureUploads),
                  static_cast<double>(get(Counter::TextureUploadBytes)) / MIB,
-                 ms(Counter::TextureUploadReadNs), get(Counter::TextureUploadReadFaults),
-                 ms(Counter::TextureUploadUnswizzleOnlyNs),
-                 get(Counter::TextureUploadUnswizzleFaults), ms(Counter::TextureUploadPreserveNs),
+                 stage_ms(Counter::TextureUploadReadNs), get(Counter::TextureUploadReadFaults),
+                 stage_ms(Counter::TextureUploadUnswizzleOnlyNs),
+                 get(Counter::TextureUploadUnswizzleFaults), stage_ms(Counter::TextureUploadPreserveNs),
                  get(Counter::TextureUploadPreserveFaults),
                  static_cast<double>(get(Counter::TextureDecodeUs)) / 1e3,
-                 get(Counter::TextureUploadConvertFaults), ms(Counter::TextureCacheStagingNs),
-                 get(Counter::TextureUploadStagingFaults), ms(Counter::TextureCacheBackendUploadNs),
+                 get(Counter::TextureUploadConvertFaults), stage_ms(Counter::TextureCacheStagingNs),
+                 get(Counter::TextureUploadStagingFaults), stage_ms(Counter::TextureCacheBackendUploadNs),
                  get(Counter::TextureUploadBackendFaults), get(Counter::StagingDedicated),
                  static_cast<double>(get(Counter::StagingDedicatedBytes)) / MIB);
     }
