@@ -686,6 +686,32 @@ TextureResourceAllocator::Resource TextureResourceAllocator::CreateImpl(
     return result;
 }
 
+ComPtr<ID3D12Resource> TextureResourceAllocator::CreateAlias(const Allocation& allocation,
+                                                             const D3D12_RESOURCE_DESC& desc,
+                                                             D3D12_RESOURCE_STATES initial_state) {
+    const D3D12_RESOURCE_ALLOCATION_INFO info =
+        device.Get()->GetResourceAllocationInfo(0, 1, &desc);
+    if (info.SizeInBytes == UINT64_MAX || info.SizeInBytes > allocation.size ||
+        info.Alignment == 0 || allocation.offset % info.Alignment != 0) {
+        return {};
+    }
+    ID3D12Heap* heap{};
+    {
+        // The spare thread may grow the block vector.
+        std::scoped_lock lock{state->mutex};
+        if (allocation.block_index < state->blocks.size()) {
+            heap = state->blocks[allocation.block_index].heap.Get();
+        }
+    }
+    ComPtr<ID3D12Resource> alias;
+    if (!heap || FAILED(device.Get()->CreatePlacedResource(heap, allocation.offset, &desc,
+                                                          initial_state, nullptr,
+                                                          IID_PPV_ARGS(&alias)))) {
+        return {};
+    }
+    return alias;
+}
+
 void TextureResourceAllocator::DeferRelease(Resource&& resource) {
     if (!resource.resource) {
         return;

@@ -249,6 +249,14 @@ void Image::UploadMemoryImpl(ID3D12Resource* buffer, size_t base_offset, u8* map
     }
     const bool cpu_visible = mapped_at_base != nullptr;
     Transition(D3D12_RESOURCE_STATE_COPY_DEST);
+    // A BC array kept compressed: the blocks go through its integer alias, one texel a block, so
+    // the texture unit reads every layer where it looks (BlockAlias).
+    const u32 unit = block_alias ? 4U : 1U;
+    ID3D12Resource* const copy_target = block_alias ? block_alias.Get() : resource.Get();
+    const DXGI_FORMAT target_footprint = block_alias ? block_alias_format : footprint_format;
+    if (block_alias) {
+        BeginBlockAliasCopy(D3D12_RESOURCE_STATE_COPY_DEST);
+    }
     bool promoted_source = false;
     for (const auto& copy : copies) {
         if (copy.image_subresource.base_level < static_cast<s32>(level_bias)) {
@@ -263,8 +271,9 @@ void Image::UploadMemoryImpl(ID3D12Resource* buffer, size_t base_offset, u8* map
             const u64 source_offset = base_offset + copy.buffer_offset +
                                       static_cast<u64>(layer) * layout.depth * layout.tight_slice;
             D3D12_TEXTURE_COPY_LOCATION src{.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT};
-            src.PlacedFootprint.Footprint = {.Format = footprint_format, .Width = layout.width,
-                .Height = layout.height, .Depth = layout.depth, .RowPitch = layout.row_pitch};
+            src.PlacedFootprint.Footprint = {.Format = target_footprint,
+                .Width = layout.width / unit, .Height = layout.height / unit,
+                .Depth = layout.depth, .RowPitch = layout.row_pitch};
             ComPtr<ID3D12Resource> transfer;
             if (layout.IsFootprint(source_offset)) {
                 // The staging layout already is a valid footprint.
@@ -317,14 +326,15 @@ void Image::UploadMemoryImpl(ID3D12Resource* buffer, size_t base_offset, u8* map
                 promoted_source = true;
             }
             const D3D12_TEXTURE_COPY_LOCATION dst{
-                .pResource = resource.Get(), .Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX,
+                .pResource = copy_target, .Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX,
                 .SubresourceIndex = Subresource(copy.image_subresource.base_level,
                                                 copy.image_subresource.base_layer +
                                                     static_cast<s32>(layer))};
             {
                 VideoCore::Perf::ScopedNsTimer timer{
                     VideoCore::Perf::Counter::TextureUploadRecordNs};
-                commands->CopyTextureRegion(&dst, copy.image_offset.x, copy.image_offset.y,
+                commands->CopyTextureRegion(&dst, static_cast<u32>(copy.image_offset.x) / unit,
+                                            static_cast<u32>(copy.image_offset.y) / unit,
                                             copy.image_offset.z, &src, nullptr);
             }
             VideoCore::Perf::AddDetailed(VideoCore::Perf::Counter::TextureUploadCopies, 1);
@@ -332,6 +342,9 @@ void Image::UploadMemoryImpl(ID3D12Resource* buffer, size_t base_offset, u8* map
                 runtime->transfer_buffers.Release(std::move(transfer));
             }
         }
+    }
+    if (block_alias) {
+        EndBlockAliasCopy(D3D12_RESOURCE_STATE_COPY_DEST);
     }
     if (unmap_source) {
         const D3D12_RANGE no_write{0, 0};
@@ -448,6 +461,13 @@ void Image::DownloadMemory(std::span<ID3D12Resource*> buffers, std::span<size_t>
     }
     Transition(D3D12_RESOURCE_STATE_COPY_SOURCE);
     auto* const commands = runtime->scheduler.CommandList();
+    // A BC array kept compressed reads back through its integer alias, in blocks (BlockAlias).
+    const u32 unit = block_alias ? 4U : 1U;
+    ID3D12Resource* const copy_source = block_alias ? block_alias.Get() : resource.Get();
+    const DXGI_FORMAT source_footprint = block_alias ? block_alias_format : footprint_format;
+    if (block_alias) {
+        BeginBlockAliasCopy(D3D12_RESOURCE_STATE_COPY_SOURCE);
+    }
     // As in the Vulkan backend: every buffer receives every copy, each at its own base offset.
     for (size_t target = 0; target < buffers.size(); ++target) {
         ID3D12Resource* const buffer = buffers[target];
@@ -459,19 +479,19 @@ void Image::DownloadMemory(std::span<ID3D12Resource*> buffers, std::span<size_t>
                 const u64 dest_offset = offsets[target] + copy.buffer_offset +
                                         static_cast<u64>(layer) * layout.depth * layout.tight_slice;
                 const D3D12_TEXTURE_COPY_LOCATION src{
-                    .pResource = resource.Get(), .Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX,
+                    .pResource = copy_source, .Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX,
                     .SubresourceIndex = Subresource(copy.image_subresource.base_level,
                                                     copy.image_subresource.base_layer +
                                                         static_cast<s32>(layer))};
-                const D3D12_BOX box{
-                    static_cast<u32>(copy.image_offset.x), static_cast<u32>(copy.image_offset.y),
-                    static_cast<u32>(copy.image_offset.z),
-                    static_cast<u32>(copy.image_offset.x) + layout.width,
-                    static_cast<u32>(copy.image_offset.y) + layout.height,
-                    static_cast<u32>(copy.image_offset.z) + layout.depth};
+                const u32 box_x = static_cast<u32>(copy.image_offset.x) / unit;
+                const u32 box_y = static_cast<u32>(copy.image_offset.y) / unit;
+                const D3D12_BOX box{box_x, box_y, static_cast<u32>(copy.image_offset.z),
+                                    box_x + layout.width / unit, box_y + layout.height / unit,
+                                    static_cast<u32>(copy.image_offset.z) + layout.depth};
                 D3D12_TEXTURE_COPY_LOCATION dst{.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT};
-                dst.PlacedFootprint.Footprint = {.Format = footprint_format, .Width = layout.width,
-                    .Height = layout.height, .Depth = layout.depth, .RowPitch = layout.row_pitch};
+                dst.PlacedFootprint.Footprint = {.Format = source_footprint,
+                    .Width = layout.width / unit, .Height = layout.height / unit,
+                    .Depth = layout.depth, .RowPitch = layout.row_pitch};
                 promoted = true;
                 if (layout.IsFootprint(dest_offset)) {
                     dst.pResource = buffer;
@@ -505,6 +525,9 @@ void Image::DownloadMemory(std::span<ID3D12Resource*> buffers, std::span<size_t>
             DecayIfDefault(commands, buffer, D3D12_RESOURCE_STATE_COPY_DEST);
         }
     }
+    if (block_alias) {
+        EndBlockAliasCopy(D3D12_RESOURCE_STATE_COPY_SOURCE);
+    }
 }
 
 u64 Image::PlanGcDownload(std::span<const BufferImageCopy> copies,
@@ -513,7 +536,7 @@ u64 Image::PlanGcDownload(std::span<const BufferImageCopy> copies,
     constexpr size_t MaxRegions = 256;
     const auto fallback = [&plan]() -> u64 { plan.clear(); return 0; };
     if (!CanTransfer() || IsDepthStencilPlanar() || info.num_samples > 1 ||
-        format.copy_format != info.format || copies.empty()) return fallback();
+        format.copy_format != info.format || copies.empty() || block_alias) return fallback();
     const auto desc = resource->GetDesc();
     u64 source_end = 0, tight_end = 0;
     for (const auto& copy : copies) {

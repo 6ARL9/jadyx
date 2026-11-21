@@ -87,6 +87,126 @@ void TraceBlitImages(std::string_view what, const Image& dst, const Image& src,
 }
 } // namespace
 
+void TextureCacheRuntime::CopyThroughBlockAliases(Image& dst, Image& src,
+                                                  std::span<const ImageCopy> copies) {
+    using namespace VideoCore::Surface;
+    // What the copy engine copies on each side: a BC array kept compressed through its integer
+    // alias, one texel a block; any other image through its resource. Region units follow
+    // ImageCopy: the source box and the extent in source texels, the destination offset in
+    // destination texels.
+    struct Side {
+        ID3D12Resource* resource;
+        DXGI_FORMAT format;   ///< of what is copied
+        u32 unit;             ///< texels a copied element is wide and high in ImageCopy terms
+        bool compressed;      ///< copied as BC blocks (its texel units are 4 a block)
+        u32 element_bytes;
+    };
+    const auto side_of = [](const Image& image) {
+        const PixelFormat copy_format = image.TransferFormat().copy_format;
+        if (image.BlockAlias()) {
+            return Side{image.BlockAlias(), image.BlockAliasFormat(), 4U, false,
+                        BytesPerBlock(copy_format)};
+        }
+        return Side{image.Handle(), image.Handle() ? image.Handle()->GetDesc().Format
+                                                   : DXGI_FORMAT_UNKNOWN,
+                    1U, DefaultBlockWidth(copy_format) > 1, BytesPerBlock(copy_format)};
+    };
+    // CopyTextureRegion takes the same family, or BC blocks and integers of the block's size.
+    const auto integer_family = [](DXGI_FORMAT format, u32 bytes) {
+        if (bytes == 16) {
+            return format >= DXGI_FORMAT_R32G32B32A32_TYPELESS &&
+                   format <= DXGI_FORMAT_R32G32B32A32_SINT;
+        }
+        return format >= DXGI_FORMAT_R32G32_TYPELESS && format <= DXGI_FORMAT_R32G32_SINT;
+    };
+    static std::atomic<u32> skipped{};
+    static std::atomic<u32> copied{};
+    const auto skip = [&](const char* reason) {
+        if (skipped.fetch_add(1, std::memory_order_relaxed) < 16) {
+            LOG_WARNING(Render, "D3D12: copy with a BC array kept compressed ({} {}x{}x{} -> {} "
+                        "{}x{}x{}) skipped: {}", src.info.format, src.info.size.width,
+                        src.info.size.height, src.info.resources.layers, dst.info.format,
+                        dst.info.size.width, dst.info.size.height, dst.info.resources.layers,
+                        reason);
+        }
+        CaptureCopySkip(dst, src, reason);
+    };
+    if (&dst == &src) {
+        return skip("a copy within one array");
+    }
+    if (!src.Handle() || !dst.Handle()) {
+        return skip("no resource");
+    }
+    if (src.IsBcDecoded() || dst.IsBcDecoded() || src.IsDepthStencilPlanar() ||
+        dst.IsDepthStencilPlanar() || src.info.num_samples != 1 || dst.info.num_samples != 1 ||
+        src.info.type != ImageType::e2D || dst.info.type != ImageType::e2D) {
+        return skip("not a plain 2D copy of blocks");
+    }
+    const Side from = side_of(src);
+    const Side to = side_of(dst);
+    if (from.element_bytes != to.element_bytes ||
+        (!from.compressed && !integer_family(from.format, from.element_bytes)) ||
+        (!to.compressed && !integer_family(to.format, to.element_bytes))) {
+        return skip("no copy between these formats");
+    }
+    src.Transition(D3D12_RESOURCE_STATE_COPY_SOURCE);
+    dst.Transition(D3D12_RESOURCE_STATE_COPY_DEST);
+    if (src.BlockAlias()) {
+        src.BeginBlockAliasCopy(D3D12_RESOURCE_STATE_COPY_SOURCE);
+    }
+    if (dst.BlockAlias()) {
+        dst.BeginBlockAliasCopy(D3D12_RESOURCE_STATE_COPY_DEST);
+    }
+    const D3D12_RESOURCE_DESC from_desc = from.resource->GetDesc();
+    auto* const commands = scheduler.CommandList();
+    for (const auto& copy : copies) {
+        const u32 level = static_cast<u32>(copy.src_subresource.base_level);
+        // The source subresource's extent in what is copied, to keep the box inside it.
+        const u32 level_width = std::max(1U, static_cast<u32>(from_desc.Width >> level));
+        const u32 level_height = std::max(1U, from_desc.Height >> level);
+        const u32 limit_width = from.compressed ? Common::AlignUp(level_width, 4U) : level_width;
+        const u32 limit_height = from.compressed ? Common::AlignUp(level_height, 4U) : level_height;
+        // The extent in source texels: into copied elements.
+        const u32 extent_width = from.unit == 4 ? Common::DivCeil(copy.extent.width, 4U)
+                                 : from.compressed ? Common::AlignUp(copy.extent.width, 4U)
+                                                   : copy.extent.width;
+        const u32 extent_height = from.unit == 4 ? Common::DivCeil(copy.extent.height, 4U)
+                                  : from.compressed ? Common::AlignUp(copy.extent.height, 4U)
+                                                    : copy.extent.height;
+        const u32 box_x = static_cast<u32>(copy.src_offset.x) / from.unit;
+        const u32 box_y = static_cast<u32>(copy.src_offset.y) / from.unit;
+        if (box_x >= limit_width || box_y >= limit_height) {
+            continue;
+        }
+        const D3D12_BOX box{box_x, box_y, 0, std::min(box_x + extent_width, limit_width),
+                            std::min(box_y + extent_height, limit_height), 1};
+        for (s32 layer = 0; layer < copy.src_subresource.num_layers; ++layer) {
+            const D3D12_TEXTURE_COPY_LOCATION source{
+                .pResource = from.resource, .Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX,
+                .SubresourceIndex = src.Subresource(copy.src_subresource.base_level,
+                                                    copy.src_subresource.base_layer + layer)};
+            const D3D12_TEXTURE_COPY_LOCATION target{
+                .pResource = to.resource, .Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX,
+                .SubresourceIndex = dst.Subresource(copy.dst_subresource.base_level,
+                                                    copy.dst_subresource.base_layer + layer)};
+            commands->CopyTextureRegion(&target, static_cast<u32>(copy.dst_offset.x) / to.unit,
+                                        static_cast<u32>(copy.dst_offset.y) / to.unit, 0,
+                                        &source, &box);
+        }
+    }
+    if (dst.BlockAlias()) {
+        dst.EndBlockAliasCopy(D3D12_RESOURCE_STATE_COPY_DEST);
+    }
+    if (src.BlockAlias()) {
+        src.EndBlockAliasCopy(D3D12_RESOURCE_STATE_COPY_SOURCE);
+    }
+    const u32 count = copied.fetch_add(1, std::memory_order_relaxed) + 1;
+    if (count <= 4 || count % 256 == 0) {
+        LOG_INFO(Render, "D3D12: {} copies through block aliases ({} -> {})", count,
+                 src.info.format, dst.info.format);
+    }
+}
+
 void TextureCacheRuntime::CopyImage(Image& dst, Image& src, std::span<const ImageCopy> copies) {
     if (src.LevelBias() != 0 || dst.LevelBias() != 0) {
         // Levels left out of a resource (SetAstcDropTopLevel) have nothing to copy.
@@ -131,6 +251,10 @@ void TextureCacheRuntime::CopyImage(Image& dst, Image& src, std::span<const Imag
             copy.extent_in_blocks = false;
         }
         CopyImage(dst, src, std::span<const ImageCopy>{normalized.data(), normalized.size()});
+        return;
+    }
+    if (src.BlockAlias() || dst.BlockAlias()) {
+        CopyThroughBlockAliases(dst, src, copies);
         return;
     }
     if (&dst == &src) {

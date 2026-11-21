@@ -84,6 +84,7 @@ enum ArrayVariant : u32 {
     ArrayCommittedCopies, ///< ArrayLayerCopies into a committed resource
     ArrayFromUint,        ///< layers into an integer texture, then texture to texture
     ArrayAliasedUint,     ///< layers into an integer texture placed over the same memory
+    ArrayAliasedLevels,   ///< ArrayAliasedUint with every level of the shape
     ArrayVariantCount,
 };
 
@@ -95,6 +96,7 @@ constexpr const char* ARRAY_VARIANT_NAMES[] = {
     "committed resource, one copy a layer",
     "integer texture, then copied texture to texture",
     "integer texture over the same memory",
+    "integer texture over the same memory, every level",
 };
 
 u32 Hash(u32 x) {
@@ -230,24 +232,30 @@ void TextureCacheRuntime::RequestBcArrayProbe(const VideoCommon::ImageInfo& imag
     const u32 probe_height = image_info.size.height;
     const u32 probe_layers = static_cast<u32>(image_info.resources.layers);
     const u32 block_bytes = VideoCore::Surface::BytesPerBlock(image_info.format);
+    const u32 probe_levels = static_cast<u32>(image_info.resources.levels);
     if ((block_bytes != 8 && block_bytes != 16) || probe_width % 4 != 0 ||
         probe_height % 4 != 0 || probe_width < 8 || probe_height < 8 || probe_layers < 2 ||
-        probe_layers * SLOTS > MAX_ARRAY_MARKERS ||
+        probe_layers * (probe_levels + 2) > MAX_ARRAY_MARKERS ||
         probe_layers > D3D12_REQ_TEXTURE2D_ARRAY_AXIS_DIMENSION ||
         bc_volume_shapes.size() >= MAX_SHAPES) {
         return;
     }
     for (const BcVolumeShape& known : bc_volume_shapes) {
         if (known.array && known.width == probe_width && known.height == probe_height &&
-            known.depth == probe_layers && known.block_bytes == block_bytes) {
+            known.depth == probe_layers && known.block_bytes == block_bytes &&
+            known.levels == probe_levels) {
             return;
         }
     }
+    // The other ways read every layer but the multiples of 4 wrong (or right, by the CPU) in
+    // all 6 shapes measured: only the aliased ones are tried.
     bc_volume_shapes.push_back({.width = probe_width, .height = probe_height,
-                                .depth = probe_layers, .array = true,
-                                .block_bytes = block_bytes});
-    LOG_INFO(Render, "D3D12: BC array probe queued for {}x{}x{} ({}, {}-byte blocks)",
-             probe_width, probe_height, probe_layers, image_info.format, block_bytes);
+                                .depth = probe_layers, .next_variant = ArrayAliasedUint,
+                                .array = true, .block_bytes = block_bytes,
+                                .levels = probe_levels});
+    LOG_INFO(Render, "D3D12: BC array probe queued for {}x{}x{} levels {} ({}, {}-byte blocks)",
+             probe_width, probe_height, probe_layers, probe_levels, image_info.format,
+             block_bytes);
 }
 
 void TextureCacheRuntime::TickBcVolumeProbes() {
@@ -492,7 +500,8 @@ void TextureCacheRuntime::StartBcVolumeProbe(const BcVolumeShape& shape, u32 var
 
 void TextureCacheRuntime::FinishBcVolumeProbe() {
     BcVolumeProbe& probe = *bc_volume_probe;
-    const u32 total = probe.slices * SLOTS;
+    const u32 per_slice = probe.levels + 2;
+    const u32 total = probe.slices * per_slice;
     const u32* words = nullptr;
     const D3D12_RANGE read_range{0, total * 4ULL};
     if (FAILED(probe.readback->Map(0, &read_range,
@@ -518,8 +527,8 @@ void TextureCacheRuntime::FinishBcVolumeProbe() {
             first_expected = expected;
         }
         black_markers += (words[index] & 0xFFFFFF) == 0 ? 1 : 0;
-        if (bad_slices.empty() || bad_slices.back() != index / SLOTS) {
-            bad_slices.push_back(index / SLOTS);
+        if (bad_slices.empty() || bad_slices.back() != index / per_slice) {
+            bad_slices.push_back(index / per_slice);
         }
     }
     const D3D12_RANGE no_write{0, 0};
@@ -532,9 +541,9 @@ void TextureCacheRuntime::FinishBcVolumeProbe() {
         probe.array ? ARRAY_VARIANT_NAMES[probe.variant] : VARIANT_NAMES[probe.variant];
 
     if (bad_markers == 0) {
-        LOG_INFO(Render, "D3D12: BC {} probe {}x{}x{} ({}-byte blocks) [{}]: all {} markers read "
-                 "right", kind, probe.width, probe.height, probe.slices, probe.block_bytes, name,
-                 total);
+        LOG_INFO(Render, "D3D12: BC {} probe {}x{}x{} levels {} ({}-byte blocks) [{}]: all {} "
+                 "markers read right", kind, probe.width, probe.height, probe.slices,
+                 probe.levels, probe.block_bytes, name, total);
         return;
     }
     // Which layers read right: a misread of every layer but the multiples of 4 is a layout
@@ -555,20 +564,27 @@ void TextureCacheRuntime::FinishBcVolumeProbe() {
     if (bad_slices.size() > 24) {
         list += ",...";
     }
-    LOG_WARNING(Render, "D3D12: BC {} probe {}x{}x{} ({}-byte blocks) [{}]: {} of {} markers "
-                "misread, {} of them black, in {} of {} slices [{}] (first read 0x{:08X}, wanted "
-                "0x{:08X}); right: {} slices multiple of 4, {} others",
-                kind, probe.width, probe.height, probe.slices, probe.block_bytes, name,
-                bad_markers, total, black_markers, bad_slices.size(), probe.slices, list,
+    LOG_WARNING(Render, "D3D12: BC {} probe {}x{}x{} levels {} ({}-byte blocks) [{}]: {} of {} "
+                "markers misread, {} of them black, in {} of {} slices [{}] (first read "
+                "0x{:08X}, wanted 0x{:08X}); right: {} slices multiple of 4, {} others",
+                kind, probe.width, probe.height, probe.slices, probe.levels, probe.block_bytes,
+                name, bad_markers, total, black_markers, bad_slices.size(), probe.slices, list,
                 first_read, first_expected, right_fourth, right_other);
 }
 
 void TextureCacheRuntime::StartBcArrayProbe(const BcVolumeShape& shape, u32 variant) {
     const u32 layers = shape.depth;
-    const u32 total = layers * SLOTS;
+    const u32 levels = variant == ArrayAliasedLevels ? shape.levels : 1U;
+    if (variant == ArrayAliasedLevels && levels <= 1) {
+        return; // the same as ArrayAliasedUint
+    }
+    const u32 per_layer = levels + 2;
+    const u32 total = layers * per_layer;
+    const u32 subresources = layers * levels;
     const u32 block_bytes = shape.block_bytes;
     const bool wide = block_bytes == 16;
-    const bool through_uint = variant == ArrayFromUint || variant == ArrayAliasedUint;
+    const bool through_uint = variant == ArrayFromUint || variant == ArrayAliasedUint ||
+                              variant == ArrayAliasedLevels;
     const bool cpu_heap = variant == ArrayCpuWrite || variant == ArrayCpuHeapCopies;
     const auto skip = [&](const char* why) {
         LOG_INFO(Render, "D3D12: BC array probe {}x{}x{} ({}-byte blocks) [{}] not run: {}",
@@ -578,7 +594,7 @@ void TextureCacheRuntime::StartBcArrayProbe(const BcVolumeShape& shape, u32 vari
     const D3D12_RESOURCE_DESC desc{
         .Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D,
         .Alignment = 0, .Width = shape.width, .Height = shape.height,
-        .DepthOrArraySize = static_cast<u16>(layers), .MipLevels = 1,
+        .DepthOrArraySize = static_cast<u16>(layers), .MipLevels = static_cast<u16>(levels),
         .Format = wide ? DXGI_FORMAT_BC6H_TYPELESS : DXGI_FORMAT_BC1_TYPELESS,
         .SampleDesc = {.Count = 1, .Quality = 0},
         .Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN, .Flags = D3D12_RESOURCE_FLAG_NONE,
@@ -589,9 +605,9 @@ void TextureCacheRuntime::StartBcArrayProbe(const BcVolumeShape& shape, u32 vari
     uint_desc.Height = shape.height / 4;
     uint_desc.Format = wide ? DXGI_FORMAT_R32G32B32A32_UINT : DXGI_FORMAT_R32G32_UINT;
     ID3D12Device* const dev = device.Get();
-    std::vector<D3D12_PLACED_SUBRESOURCE_FOOTPRINT> footprints(layers);
+    std::vector<D3D12_PLACED_SUBRESOURCE_FOOTPRINT> footprints(subresources);
     u64 layer_data_bytes = 0;
-    dev->GetCopyableFootprints(through_uint ? &uint_desc : &desc, 0, layers, 0,
+    dev->GetCopyableFootprints(through_uint ? &uint_desc : &desc, 0, subresources, 0,
                                footprints.data(), nullptr, nullptr, &layer_data_bytes);
 
     BcVolumeProbe probe{};
@@ -602,6 +618,7 @@ void TextureCacheRuntime::StartBcArrayProbe(const BcVolumeShape& shape, u32 vari
     probe.salt = Hash(++bc_volume_probe_count * 0x85EBCA6BU);
     probe.array = true;
     probe.block_bytes = block_bytes;
+    probe.levels = levels;
 
     // Every resource before any command, so a failure releases them unused.
     const D3D12_HEAP_PROPERTIES default_heap{.Type = D3D12_HEAP_TYPE_DEFAULT};
@@ -612,7 +629,7 @@ void TextureCacheRuntime::StartBcArrayProbe(const BcVolumeShape& shape, u32 vari
             skip("the texture could not be created");
             return;
         }
-    } else if (variant == ArrayAliasedUint) {
+    } else if (variant == ArrayAliasedUint || variant == ArrayAliasedLevels) {
         const D3D12_RESOURCE_ALLOCATION_INFO bc_info = dev->GetResourceAllocationInfo(0, 1, &desc);
         const D3D12_RESOURCE_ALLOCATION_INFO uint_info =
             dev->GetResourceAllocationInfo(0, 1, &uint_desc);
@@ -684,8 +701,14 @@ void TextureCacheRuntime::StartBcArrayProbe(const BcVolumeShape& shape, u32 vari
         std::memset(mapped, 0, static_cast<size_t>(data_bytes));
         for (u32 index = 0; index < total; ++index) {
             const Marker marker = MakeMarkerFor(block_bytes, probe.salt, index);
-            const auto [x, y] = PlaceOf(index % SLOTS, shape.width, shape.height);
-            const D3D12_PLACED_SUBRESOURCE_FOOTPRINT& layer_footprint = footprints[index / SLOTS];
+            // d3d12_array_layer_probe.comp: three blocks of level 0, then the first block of
+            // each other level.
+            const u32 slot = index % per_layer;
+            const u32 level = slot < SLOTS ? 0U : slot - 2;
+            const auto [x, y] = slot < SLOTS ? PlaceOf(slot, shape.width, shape.height)
+                                             : std::pair<u32, u32>{0, 0};
+            const D3D12_PLACED_SUBRESOURCE_FOOTPRINT& layer_footprint =
+                footprints[level + (index / per_layer) * levels];
             const u64 offset = block_data ? MARKER_STRIDE * index
                                           : layer_footprint.Offset +
                                                 u64{y / 4} * layer_footprint.Footprint.RowPitch +
@@ -733,16 +756,16 @@ void TextureCacheRuntime::StartBcArrayProbe(const BcVolumeShape& shape, u32 vari
                                         .Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT};
         D3D12_TEXTURE_COPY_LOCATION dst{.pResource = destination,
                                         .Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX};
-        for (u32 layer = 0; layer < layers; ++layer) {
-            src.PlacedFootprint = footprints[layer];
-            dst.SubresourceIndex = layer;
+        for (u32 subresource = 0; subresource < subresources; ++subresource) {
+            src.PlacedFootprint = footprints[subresource];
+            dst.SubresourceIndex = subresource;
             commands->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
         }
     };
     if (variant == ArrayCpuWrite) {
         TransitionResource(commands, texture, D3D12_RESOURCE_STATE_COMMON,
                            D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-    } else if (variant == ArrayAliasedUint) {
+    } else if (variant == ArrayAliasedUint || variant == ArrayAliasedLevels) {
         D3D12_RESOURCE_BARRIER alias{.Type = D3D12_RESOURCE_BARRIER_TYPE_ALIASING,
                                      .Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE,
                                      .Aliasing = {.pResourceBefore = nullptr,
@@ -803,7 +826,7 @@ void TextureCacheRuntime::StartBcArrayProbe(const BcVolumeShape& shape, u32 vari
     srv_desc.Format = wide ? DXGI_FORMAT_BC6H_UF16 : DXGI_FORMAT_BC1_UNORM;
     srv_desc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
     srv_desc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DARRAY;
-    srv_desc.Texture2DArray = {.MostDetailedMip = 0, .MipLevels = 1, .FirstArraySlice = 0,
+    srv_desc.Texture2DArray = {.MostDetailedMip = 0, .MipLevels = levels, .FirstArraySlice = 0,
                                .ArraySize = layers, .PlaneSlice = 0,
                                .ResourceMinLODClamp = 0.0f};
     dev->CreateShaderResourceView(texture, &srv_desc, srv);
@@ -812,7 +835,7 @@ void TextureCacheRuntime::StartBcArrayProbe(const BcVolumeShape& shape, u32 vari
                                    .width = shape.width,
                                    .height = shape.height,
                                    .layers = layers,
-                                   .levels = 1,
+                                   .levels = levels,
                                    .volume = false});
     view_descriptors.Free(srv);
     TransitionBuffer(commands, probe.results.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS,

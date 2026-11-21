@@ -128,6 +128,10 @@ void SetBc3dDecode(u8 mode) {
     decode_bc_3d.store(mode, std::memory_order_relaxed);
 }
 
+void SetBcArrayAlias(u8 mode) {
+    bc_array_alias.store(mode, std::memory_order_relaxed);
+}
+
 void SetAstcGpuDecode(bool enabled) {
     gpu_astc_decode.store(enabled, std::memory_order_relaxed);
 }
@@ -643,10 +647,57 @@ Image::Image(TextureCacheRuntime& runtime_, const VideoCommon::ImageInfo& info_,
             runtime_.bc_3d_reserved += volume_bytes;
         }
     }
+    // A BC 2D array the emulator would decode stays compressed when an integer texture of one
+    // texel a block takes the same memory (SetBcArrayAlias): the copy engine writes that one and
+    // the texture unit reads every layer right (the BC array probe, 6 of 6 shapes of Metroid
+    // Prime Remastered). No decode, no kept blocks, an eighth of the memory for BC6H.
+    const u8 array_alias_mode = bc_array_alias.load(std::memory_order_relaxed);
+    D3D12_RESOURCE_DESC block_alias_desc{};
+    bool alias_blocks = false;
+    if (array_alias_mode != 0 && !native_blocks && info_.type == ImageType::e2D &&
+        info_.num_samples == 1 && info_.resources.layers > 1 && !unaligned_bc_extent &&
+        !guest_palette && info_.size.width % 4 == 0 && info_.size.height % 4 == 0 &&
+        decode_bc_arrays.load(std::memory_order_relaxed) &&
+        DecodedBcFormat(info_.format, info_.type).has_value()) {
+        const u32 block_bytes = VideoCore::Surface::BytesPerBlock(info_.format);
+        const u32 levels = static_cast<u32>(info_.resources.levels);
+        // Every level whole blocks in both: the integer texture's levels halve in blocks.
+        bool levels_match = levels == 1 || array_alias_mode >= 2;
+        for (u32 level = 1; level < levels && levels_match; ++level) {
+            levels_match =
+                std::max(1U, (info_.size.width / 4) >> level) ==
+                    Common::DivCeil(std::max(1U, info_.size.width >> level), 4U) &&
+                std::max(1U, (info_.size.height / 4) >> level) ==
+                    Common::DivCeil(std::max(1U, info_.size.height >> level), 4U);
+        }
+        if ((block_bytes == 8 || block_bytes == 16) && levels_match) {
+            const D3D12_RESOURCE_DESC bc_desc{
+                .Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D, .Alignment = 0,
+                .Width = info_.size.width, .Height = info_.size.height,
+                .DepthOrArraySize = static_cast<u16>(info_.resources.layers),
+                .MipLevels = static_cast<u16>(levels), .Format = format.resource,
+                .SampleDesc = {.Count = 1, .Quality = 0},
+                .Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN, .Flags = D3D12_RESOURCE_FLAG_NONE,
+            };
+            block_alias_desc = bc_desc;
+            block_alias_desc.Width = info_.size.width / 4;
+            block_alias_desc.Height = info_.size.height / 4;
+            block_alias_desc.Format = block_bytes == 16 ? DXGI_FORMAT_R32G32B32A32_UINT
+                                                        : DXGI_FORMAT_R32G32_UINT;
+            ID3D12Device* const alias_device = runtime_.device.Get();
+            const D3D12_RESOURCE_ALLOCATION_INFO bc_info =
+                alias_device->GetResourceAllocationInfo(0, 1, &bc_desc);
+            const D3D12_RESOURCE_ALLOCATION_INFO alias_info =
+                alias_device->GetResourceAllocationInfo(0, 1, &block_alias_desc);
+            alias_blocks = bc_info.SizeInBytes != UINT64_MAX &&
+                           bc_info.SizeInBytes == alias_info.SizeInBytes &&
+                           bc_info.Alignment == alias_info.Alignment;
+        }
+    }
     if (bc_3d || (!native_blocks && info_.type == ImageType::e2D && info_.num_samples == 1 &&
                   (unaligned_bc_extent || guest_palette ||
                    (decode_bc_arrays.load(std::memory_order_relaxed) &&
-                    info_.resources.layers > 1)))) {
+                    info_.resources.layers > 1 && !alias_blocks)))) {
         if (const std::optional<FormatInfo> decoded = DecodedBcFormat(info_.format, info_.type)) {
             if (!bc_3d && !unaligned_bc_extent && !guest_palette &&
                 info_.resources.layers > 1) {
@@ -724,7 +775,7 @@ Image::Image(TextureCacheRuntime& runtime_, const VideoCommon::ImageInfo& info_,
     // shader unswizzles them. Only where the host keeps the guest's texel blocks unchanged.
     const BlitImageHelper* const unswizzler = runtime->blit_helper;
     gpu_unswizzled =
-        !native_blocks && !format.converted && !gpu_decoded &&
+        !native_blocks && !format.converted && !gpu_decoded && !alias_blocks &&
         gpu_unswizzle.load(std::memory_order_relaxed) && unswizzler &&
         unswizzler->CanUnswizzle() && info_.type == ImageType::e2D && info_.num_samples == 1 &&
         guest_size_bytes >= GPU_UNSWIZZLE_MIN_BYTES &&
@@ -818,6 +869,9 @@ Image::Image(TextureCacheRuntime& runtime_, const VideoCommon::ImageInfo& info_,
         needs_placed_init = allocated.placed &&
                             (resource_flags & (D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET |
                                                D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL)) != 0;
+        if (alias_blocks && resource) {
+            CreateBlockAlias(block_alias_desc);
+        }
         if (!resource) {
             // Name the image: an invalid desc (size UINT64_MAX) fails without any other log line.
             const D3D12_RESOURCE_ALLOCATION_INFO allocation_info =
@@ -857,10 +911,15 @@ Image::~Image() {
 }
 
 void Image::ReleaseResources() {
+    if (runtime && block_alias) {
+        runtime->scheduler.DeferRelease(std::move(block_alias));
+    }
     if (runtime && resource) {
         runtime->texture_allocator.DeferRelease(
             {std::move(resource), std::move(resource_allocation), resource_allocation != nullptr});
     }
+    // The placed resources hold it until their deferred release.
+    block_alias_heap.Reset();
     if (runtime && slice_array) {
         runtime->scheduler.DeferRelease(std::move(slice_array));
     }
@@ -893,6 +952,9 @@ Image& Image::operator=(Image&& other) noexcept {
         gc_readback = std::move(other.gc_readback);
         resource = std::move(other.resource);
         resource_allocation = std::move(other.resource_allocation);
+        block_alias = std::move(other.block_alias);
+        block_alias_heap = std::move(other.block_alias_heap);
+        block_alias_format = other.block_alias_format;
         format = other.format;
         gpu_decoded = other.gpu_decoded;
         gpu_bc_decoded = other.gpu_bc_decoded;
@@ -1249,13 +1311,109 @@ void Image::InitializePlacedResource() {
     ++write_version;
 }
 
+void Image::CreateBlockAlias(D3D12_RESOURCE_DESC alias_desc) {
+    static std::atomic<u32> block_aliased_count{};
+    static std::atomic<u32> own_heaps{};
+    static std::atomic<u32> failures{};
+    static std::atomic<u64> saved_bytes{};
+    ID3D12Device* const dev = runtime->device.Get();
+    const D3D12_RESOURCE_DESC base_desc = resource->GetDesc();
+    alias_desc.Alignment = base_desc.Alignment;
+    if (resource_allocation) {
+        block_alias = runtime->texture_allocator.CreateAlias(*resource_allocation, alias_desc,
+                                                             D3D12_RESOURCE_STATE_COMMON);
+    }
+    if (!block_alias) {
+        // A committed resource, or an alias that does not fit where the allocator put it: the
+        // pair in a heap of their own, before anything was recorded on the first one.
+        D3D12_RESOURCE_DESC bc_desc = base_desc;
+        bc_desc.Alignment = 0;
+        alias_desc.Alignment = 0;
+        const D3D12_RESOURCE_ALLOCATION_INFO bc_info =
+            dev->GetResourceAllocationInfo(0, 1, &bc_desc);
+        const D3D12_RESOURCE_ALLOCATION_INFO alias_info =
+            dev->GetResourceAllocationInfo(0, 1, &alias_desc);
+        const D3D12_HEAP_DESC heap_desc{
+            .SizeInBytes = (std::max)(bc_info.SizeInBytes, alias_info.SizeInBytes),
+            .Properties = {.Type = D3D12_HEAP_TYPE_DEFAULT},
+            .Alignment = (std::max)(bc_info.Alignment, alias_info.Alignment),
+            .Flags = D3D12_HEAP_FLAG_ALLOW_ONLY_NON_RT_DS_TEXTURES,
+        };
+        ComPtr<ID3D12Heap> heap;
+        ComPtr<ID3D12Resource> placed;
+        ComPtr<ID3D12Resource> alias;
+        if (SUCCEEDED(dev->CreateHeap(&heap_desc, IID_PPV_ARGS(&heap))) &&
+            SUCCEEDED(dev->CreatePlacedResource(heap.Get(), 0, &bc_desc,
+                                                D3D12_RESOURCE_STATE_COMMON, nullptr,
+                                                IID_PPV_ARGS(&placed))) &&
+            SUCCEEDED(dev->CreatePlacedResource(heap.Get(), 0, &alias_desc,
+                                                D3D12_RESOURCE_STATE_COMMON, nullptr,
+                                                IID_PPV_ARGS(&alias)))) {
+            runtime->texture_allocator.DeferRelease(
+                {std::move(resource), std::move(resource_allocation), true});
+            resource = std::move(placed);
+            resource_allocation.reset();
+            block_alias = std::move(alias);
+            block_alias_heap = std::move(heap);
+            cpu_writable = false;
+            state = D3D12_RESOURCE_STATE_COMMON;
+            own_heaps.fetch_add(1, std::memory_order_relaxed);
+        }
+    }
+    if (!block_alias) {
+        // The array stays compressed without it: its layers may read wrong, the game goes on.
+        if (failures.fetch_add(1, std::memory_order_relaxed) < 8) {
+            LOG_WARNING(Render, "D3D12: BC array {} {}x{}x{} got no block alias; it is written "
+                        "through the BC resource", info.format, info.size.width,
+                        info.size.height, info.resources.layers);
+        }
+        return;
+    }
+    block_alias_format = alias_desc.Format;
+    // What decoding it would have taken, less its blocks: BC1/BC4 decode to 8 times their size,
+    // the 16-byte formats to 4 times (RGBA8) or more (BC6H).
+    const u64 blocks = dev->GetResourceAllocationInfo(0, 1, &base_desc).SizeInBytes;
+    const u64 decoded = blocks * (VideoCore::Surface::BytesPerBlock(info.format) == 8 ? 8 : 4);
+    const u64 saved = saved_bytes.fetch_add(decoded - blocks, std::memory_order_relaxed) +
+                      (decoded - blocks);
+    const u32 count = block_aliased_count.fetch_add(1, std::memory_order_relaxed) + 1;
+    if (count <= 8 || count % 64 == 0) {
+        LOG_INFO(Render, "D3D12: BC array {} {}x{}x{} levels {} kept compressed through a block "
+                 "alias: {} arrays ({} in their own heap), at least {} MiB not decoded",
+                 info.format, info.size.width, info.size.height, info.resources.layers,
+                 info.resources.levels, count, own_heaps.load(std::memory_order_relaxed),
+                 saved >> 20);
+    }
+}
+
+void Image::BeginBlockAliasCopy(D3D12_RESOURCE_STATES alias_state) {
+    const D3D12_RESOURCE_BARRIER barriers[] = {
+        {.Type = D3D12_RESOURCE_BARRIER_TYPE_ALIASING,
+         .Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE,
+         .Aliasing = {.pResourceBefore = resource.Get(), .pResourceAfter = block_alias.Get()}},
+        TransitionBarrier(block_alias.Get(), D3D12_RESOURCE_STATE_COMMON, alias_state),
+    };
+    runtime->scheduler.CommandList()->ResourceBarrier(2, barriers);
+}
+
+void Image::EndBlockAliasCopy(D3D12_RESOURCE_STATES alias_state) {
+    const D3D12_RESOURCE_BARRIER barriers[] = {
+        TransitionBarrier(block_alias.Get(), alias_state, D3D12_RESOURCE_STATE_COMMON),
+        {.Type = D3D12_RESOURCE_BARRIER_TYPE_ALIASING,
+         .Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE,
+         .Aliasing = {.pResourceBefore = block_alias.Get(), .pResourceAfter = resource.Get()}},
+    };
+    runtime->scheduler.CommandList()->ResourceBarrier(2, barriers);
+}
+
 size_t Image::HeapIndex() const noexcept {
     return resource_allocation ? TextureResourceAllocator::HeapOf(*resource_allocation) : SIZE_MAX;
 }
 
 bool Image::Relocate(const std::vector<bool>& avoid) {
-    // A pending GC readback copies out of the current resource.
-    if (!resource || !resource_allocation || gc_readback) return false;
+    // A pending GC readback copies out of the current resource. A move would leave the block
+    // alias behind, and the copy engine reads its layers wrong.
+    if (!resource || !resource_allocation || gc_readback || block_alias) return false;
     const D3D12_RESOURCE_DESC desc = resource->GetDesc();
     auto moved = runtime->texture_allocator.CreateInUsedHeaps(
         desc, D3D12_RESOURCE_STATE_COPY_DEST, cpu_writable, avoid);
@@ -1292,7 +1450,7 @@ bool Image::Relocate(const std::vector<bool>& avoid) {
 }
 
 bool Image::MoveToOwnMemory() {
-    if (!resource || !resource_allocation || gc_readback) return false;
+    if (!resource || !resource_allocation || gc_readback || block_alias) return false;
     D3D12_RESOURCE_DESC desc = resource->GetDesc();
     desc.Alignment = 0;
     const D3D12_HEAP_PROPERTIES heap{.Type = D3D12_HEAP_TYPE_DEFAULT};
@@ -1317,7 +1475,7 @@ bool Image::MoveToOwnMemory() {
 }
 
 void Image::RewriteThroughCopy() {
-    if (!resource || gc_readback) return;
+    if (!resource || gc_readback || block_alias) return;
     D3D12_RESOURCE_DESC desc = resource->GetDesc();
     desc.Alignment = 0;
     const D3D12_HEAP_PROPERTIES heap{.Type = D3D12_HEAP_TYPE_DEFAULT};
@@ -1553,7 +1711,8 @@ ID3D12Resource* Image::Reinterpreted(DXGI_FORMAT family) {
             return reinterpreted[index].Get();
         }
     }
-    if (!resource || reinterpreted_sync.Full()) {
+    // A copy of a BC array kept compressed would go through the copy engine's layer layout.
+    if (!resource || reinterpreted_sync.Full() || block_alias) {
         return nullptr;
     }
     D3D12_RESOURCE_DESC desc = resource->GetDesc();

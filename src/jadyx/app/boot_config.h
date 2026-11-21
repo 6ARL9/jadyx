@@ -215,6 +215,9 @@ struct BootConfig {
     /// Probe how the console reads each shape of BC 2D array the emulator decodes
     /// ("bc_array_probe=1"): measurement only, results in the log.
     bool bc_array_probe{};
+    /// BC 2D arrays kept compressed through an integer alias ("bc_array_alias=0|1|2"; 1 by
+    /// default: those with one level).
+    u8 bc_array_alias{1};
     /// Fine per-draw D3D12 CPU timers ("gpu_profile=1"). Off because clock reads are measurable.
     bool gpu_profile{};
     /// Writes every translated guest shader to the dump folder ("dump_guest_shaders=1").

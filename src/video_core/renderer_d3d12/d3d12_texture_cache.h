@@ -143,6 +143,11 @@ public:
     std::optional<size_t> GetSamplerHeapBudget() const { return SamplerHeap::CAPACITY; }
 
     void CopyImage(Image& dst, Image& src, std::span<const VideoCommon::ImageCopy> copies);
+    /// A copy with a BC array kept compressed on either side (Image::BlockAlias): through the
+    /// block aliases, in blocks, so the copy engine reads and writes the layout the texture unit
+    /// reads. Skipped, and logged, where no such copy exists.
+    void CopyThroughBlockAliases(Image& dst, Image& src,
+                                 std::span<const VideoCommon::ImageCopy> copies);
     void CopyImageMSAA(Image& dst, Image& src, std::span<const VideoCommon::ImageCopy> copies);
     /// CopyImage between resource formats of different DXGI families: through a buffer.
     void CopyThroughBuffer(Image& dst, Image& src, std::span<const VideoCommon::ImageCopy> copies);
@@ -271,6 +276,7 @@ private:
         bool waited{}; ///< logged that it waits for memory
         bool array{};  ///< a 2D array of depth layers (bc_array_probe)
         u32 block_bytes{16};
+        u32 levels{1};
     };
     /// The one probe whose commands the GPU has not finished.
     struct BcVolumeProbe {
@@ -286,6 +292,7 @@ private:
         u32 salt;
         bool array{};
         u32 block_bytes{16};
+        u32 levels{1};
         ComPtr<ID3D12Resource> owned_texture; ///< committed or placed: not the allocator's
         ComPtr<ID3D12Resource> uint_texture;  ///< the integer texture of the array variants
         ComPtr<ID3D12Heap> heap;              ///< holds the aliased pair
@@ -450,6 +457,20 @@ public:
     [[nodiscard]] bool CpuWritable() const noexcept {
         return cpu_writable;
     }
+    /// A BC 2D array kept compressed (SetBcArrayAlias): the 128-bit or 64-bit integer texture
+    /// placed over the same memory, one texel a block. The copy engine writes and reads it in
+    /// the layout the texture unit reads; through the BC resource it would put every layer but
+    /// the multiples of 4 where the texture unit does not look. Null for every other image.
+    [[nodiscard]] ID3D12Resource* BlockAlias() const noexcept {
+        return block_alias.Get();
+    }
+    [[nodiscard]] DXGI_FORMAT BlockAliasFormat() const noexcept {
+        return block_alias_format;
+    }
+    /// Barriers around copy-engine work on the block alias in `alias_state` (COPY_SOURCE or
+    /// COPY_DEST). The resource itself is moved to the matching copy state first (Transition).
+    void BeginBlockAliasCopy(D3D12_RESOURCE_STATES alias_state);
+    void EndBlockAliasCopy(D3D12_RESOURCE_STATES alias_state);
     /// The texture heap the resource is placed in; SIZE_MAX for a committed resource.
     [[nodiscard]] size_t HeapIndex() const noexcept;
     /// Copies the resource on the GPU into free space of a heap in use that `avoid` does not
@@ -653,9 +674,16 @@ private:
     void DownloadDepthStencil(std::span<ID3D12Resource*> buffers, std::span<size_t> offsets,
                               std::span<const VideoCommon::BufferImageCopy> copies);
 
+    /// Makes block_alias over resource (see BlockAlias): where the allocator placed it, or with
+    /// the resource moved into a heap of their own.
+    void CreateBlockAlias(D3D12_RESOURCE_DESC alias_desc);
+
     TextureCacheRuntime* runtime{};
     ComPtr<ID3D12Resource> resource;
     std::shared_ptr<TextureResourceAllocator::Allocation> resource_allocation;
+    ComPtr<ID3D12Resource> block_alias;
+    ComPtr<ID3D12Heap> block_alias_heap; ///< the pair's own heap, when the allocator's did not fit
+    DXGI_FORMAT block_alias_format{};
     FormatInfo format{};
     bool gpu_decoded{};
     bool gpu_bc_decoded{};
@@ -871,6 +899,12 @@ void SetBcVolumeProbe(bool enabled);
 /// off by default): markers written into scratch arrays of that shape in several ways are read
 /// back through the texture unit, and the log says which ways read right. Measurement only.
 void SetBcArrayProbe(bool enabled);
+
+/// BC 2D arrays kept compressed instead of decoded (boot.cfg "bc_array_alias=0|1|2"): 0 decodes
+/// them as before, 1 (default) keeps the ones with one level, 2 also those with mipmaps whose
+/// levels are whole blocks. The copy engine writes them through an integer texture placed over
+/// the same memory (Image::BlockAlias). Applies to images created from now on.
+void SetBcArrayAlias(u8 mode);
 
 /// Whether ASTC images kept as RGBA8 are decoded by the compute shader (the default) rather than
 /// the CPU. Applies to images created from now on.

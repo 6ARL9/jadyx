@@ -426,6 +426,12 @@ void ParseBootConfigFile(const std::string& install_path, BootConfig& config) {
                                                     : "stay compressed"));
                 continue;
             }
+            if (line == "bc_array_alias=0" || line == "bc_array_alias=1" ||
+                line == "bc_array_alias=2") {
+                config.bc_array_alias = static_cast<u8>(line.back() - '0');
+                WriteDiag(std::string{"boot.cfg: D3D12 BC array alias "} + line.back());
+                continue;
+            }
             if (line == "bc_array_probe=0" || line == "bc_array_probe=1") {
                 config.bc_array_probe = line.back() == '1';
                 WriteDiag(std::string{"boot.cfg: D3D12 BC array probe "} +
