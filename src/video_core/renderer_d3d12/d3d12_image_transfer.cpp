@@ -348,7 +348,10 @@ void Image::UploadMemory(const StagingBufferRef& map, std::span<const BufferImag
 
 void Image::PreserveGuestBlocks(std::span<const u8> data,
                                 std::span<const BufferImageCopy> copies) {
-    if (!IsBcDecoded() || copies.empty()) {
+    // Block copies only run between 2D images (CopyDecodedBlocks), so a decoded volume's blocks
+    // would never be read: a 512x256x368 light volume paid a 46 MiB shadow image, and a 48 MiB
+    // staging buffer and copy at every refresh, for nothing.
+    if (!IsBcDecoded() || copies.empty() || info.type == ImageType::e3D) {
         return;
     }
     // The generic cache calls this with the original, unswizzled layout, before ConvertImage
@@ -385,7 +388,7 @@ void Image::PreserveGuestBlocks(std::span<const u8> data,
 }
 
 Image* Image::EnsureGuestBlocks() {
-    if (!IsBcDecoded()) return nullptr;
+    if (!IsBcDecoded() || info.type == ImageType::e3D) return nullptr;
     if (!guest_blocks) {
         guest_blocks = std::make_unique<Image>(*runtime, info, gpu_addr, cpu_addr, true);
         guest_blocks_coverage.Reset(info.size.width, info.size.height,

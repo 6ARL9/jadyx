@@ -43,6 +43,13 @@ void UnswizzleTexture(std::span<u8> output, std::span<const u8> input, u32 bytes
                       u32 stride_alignment = 1, u32 linear_pitch = 0);
 
 /// Swizzles linear memory into a block linear texture.
+/// Splits large unswizzles across helper threads (on unless boot.cfg "parallel_unswizzle=0").
+void SetParallelUnswizzle(bool enabled) noexcept;
+
+/// Makes this thread's unswizzles run on it alone: a background decoder must not compete with the
+/// game for cores.
+void SetSwizzleSingleThreaded(bool single) noexcept;
+
 void SwizzleTexture(std::span<u8> output, std::span<const u8> input, u32 bytes_per_pixel, u32 width,
                     u32 height, u32 depth, u32 block_height, u32 block_depth,
                     u32 stride_alignment = 1);

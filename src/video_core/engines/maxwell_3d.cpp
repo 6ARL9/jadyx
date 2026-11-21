@@ -289,7 +289,9 @@ u32 Maxwell3D::GetMaxCurrentVertices() {
         const auto& limit = regs.vertex_stream_limits[index];
         const GPUVAddr gpu_addr_begin = array.Address();
         const GPUVAddr gpu_addr_end = limit.Address() + 1;
-        const u32 address_size = static_cast<u32>(gpu_addr_end - gpu_addr_begin);
+        // A limit below the start holds no vertices (and would wrap to almost 4 GiB).
+        const u32 address_size =
+            gpu_addr_end > gpu_addr_begin ? static_cast<u32>(gpu_addr_end - gpu_addr_begin) : 0;
         num_vertices = (std::max)(
             num_vertices, address_size / (std::max)(attribute.SizeInBytes(), array.stride.Value()));
         break;

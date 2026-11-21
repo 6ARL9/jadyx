@@ -42,6 +42,7 @@ void ShowLoadProgress(VideoCore::RendererBase& renderer, size_t done, size_t tot
 void ShowCpuLoadProgress(VideoCore::RendererBase& renderer, size_t done, size_t total);
 void RemoveDeviceForProbe(VideoCore::RendererBase& renderer);
 void SetBcArrayDecode(bool enabled); // d3d12_texture_cache.h
+void SetBc3dDecode(u8 mode); // d3d12_texture_cache.h
 void SetAstcGpuDecode(bool enabled); // d3d12_texture_cache.h
 void SetBcGpuDecode(bool enabled); // d3d12_texture_cache.h
 void SetNotZeroedHeaps(bool enabled); // d3d12_resource_utils.h
@@ -128,3 +129,7 @@ void SetRenderTargetInheritance(bool enabled) noexcept; // texture_cache/texture
 void SetReclaimSupersededImages(bool enabled) noexcept; // texture_cache/texture_cache_base.h
 void SetRenderTargetEarlyOut(bool enabled) noexcept;   // texture_cache/texture_cache_base.h
 } // namespace VideoCommon
+
+namespace Tegra::Texture {
+void SetParallelUnswizzle(bool enabled) noexcept; // video_core/textures/decoders.h
+} // namespace Tegra::Texture

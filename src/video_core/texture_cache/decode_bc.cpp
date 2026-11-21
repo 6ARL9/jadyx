@@ -9,6 +9,9 @@
 #include <atomic>
 #include <cstring>
 #include <span>
+#include <system_error>
+#include <thread>
+#include <vector>
 #include <bc_decoder.h>
 
 #include "common/common_types.h"
@@ -23,6 +26,60 @@ constexpr u32 BLOCK_SIZE = 4;
 using VideoCore::Surface::PixelFormat;
 
 std::atomic<bool> bc_guest_palette{false};
+
+/// Texels a decode thread needs to be worth starting, and the most threads one level gets.
+constexpr size_t MIN_TEXELS_PER_DECODE_THREAD = size_t{1} << 20;
+constexpr u32 MAX_DECODE_THREADS = 4;
+
+/// Set while a thread decodes part of a level, so a decode nested in it stays on that thread.
+thread_local bool decoding_slices = false;
+/// SetBcDecodeSingleThreaded: this thread decodes alone (a background decoder).
+thread_local bool single_threaded_decode = false;
+
+/// Calls work(first, count) over the units [0, slices) of a level (depth slices or array layers),
+/// split across up to MAX_DECODE_THREADS threads when each gets MIN_TEXELS_PER_DECODE_THREAD
+/// texels or more. Units are independent, so a large level (a 512x256x368 light volume takes
+/// seconds on one core) is decoded by idle cores instead of stalling the GPU thread alone.
+template <typename Work>
+void ForEachSliceRange(u32 slices, size_t texels_per_slice, const Work& work) {
+    u32 threads = 1;
+    if (!decoding_slices && !single_threaded_decode && slices > 1) {
+        const size_t by_work = texels_per_slice * slices / MIN_TEXELS_PER_DECODE_THREAD;
+        const u32 cores = (std::max)(std::thread::hardware_concurrency(), 1u);
+        threads = static_cast<u32>((std::min<size_t>)(
+            (std::min<size_t>)(by_work, MAX_DECODE_THREADS), (std::min)(cores, slices)));
+        threads = (std::max)(threads, 1u);
+    }
+    const auto run = [&work](u32 first, u32 count) {
+        const bool nested = decoding_slices;
+        decoding_slices = true;
+        work(first, count);
+        decoding_slices = nested;
+    };
+    if (threads == 1) {
+        run(0, slices);
+        return;
+    }
+    const u32 per_thread = (slices + threads - 1) / threads;
+    std::vector<std::thread> helpers;
+    helpers.reserve(threads - 1);
+    u32 first = per_thread;
+    for (; first < slices; first += per_thread) {
+        const u32 count = (std::min)(per_thread, slices - first);
+        try {
+            helpers.emplace_back(run, first, count);
+        } catch (const std::system_error&) {
+            break; // No thread: this one decodes the rest below.
+        }
+    }
+    run(0, (std::min)(per_thread, slices));
+    for (; first < slices; first += per_thread) {
+        run(first, (std::min)(per_thread, slices - first));
+    }
+    for (std::thread& helper : helpers) {
+        helper.join();
+    }
+}
 
 /// bcn's decode with the colors replaced by GuestBc1Palette (the alpha stays bcn's).
 template <auto decode, bool separate_alpha>
@@ -97,7 +154,6 @@ void DecompressBlocks(std::span<const u8> input, std::span<u8> output, BufferIma
     const u32 height = copy.image_extent.height * copy.image_subresource.num_layers;
     const u32 depth = copy.image_extent.depth;
     const u32 block_width = (std::min)(width, BLOCK_SIZE);
-    const u32 block_height = (std::min)(height, BLOCK_SIZE);
     const u32 pitch = width * out_bpp;
     // Cropping the decoded block to a 1/2/3-texel mip width does not change the
     // compressed block's 4-texel width. Otherwise the next block row is read at
@@ -126,27 +182,50 @@ void DecompressBlocks(std::span<const u8> input, std::span<u8> output, BufferIma
         }
     }
 
-    size_t input_offset = 0;
-    size_t output_offset = 0;
-    for (u32 slice = 0; slice < depth; ++slice) {
-        for (u32 y = 0; y < height; y += block_height) {
-            size_t src_offset = input_offset;
-            size_t dst_offset = output_offset;
-            for (u32 x = 0; x < width; x += block_width) {
-                const u8* src = input.data() + src_offset;
-                u8* const dst = output.data() + dst_offset;
-                if constexpr (IsSigned(pixel_format)) {
-                    decompress(src, dst, x, y, width, height, is_signed);
-                } else {
-                    decompress(src, dst, x, y, width, height);
-                }
-                src_offset += block_size;
-                dst_offset += block_width * out_bpp;
-            }
-            input_offset += input_row_pitch;
-            output_offset += block_height * pitch;
-        }
+    // Each array layer starts a new row of blocks, so a layer whose height is not a multiple of
+    // four (the 2x2 and 1x1 levels of a cube map, for example) owns the padding rows of its last
+    // block. Decoding all layers as one tall image read those padding rows as the next layer's
+    // texels and every later layer from the wrong block: in a 2x2 six-layer level, layer 1 got
+    // layer 0's padding and layer 2 got layer 1's texels. Decode and crop each layer on its own.
+    const u32 layers = static_cast<u32>((std::max)(copy.image_subresource.num_layers, 1));
+    const u32 layer_height = copy.image_extent.height;
+    const u32 layer_block_height = (std::min)(layer_height, BLOCK_SIZE);
+    if (width == 0 || layer_height == 0) {
+        return;
     }
+    // A unit is one layer of one depth slice: its rows of blocks in the input and its texel rows
+    // in the output, so each unit's offsets follow from its index (slices outermost, as the guest
+    // lays them out). Units are independent: large arrays (a 2888x2888 four-layer BC6H array took
+    // over a second on one core) and volumes are split across threads.
+    const u32 block_rows = (layer_height + layer_block_height - 1) / layer_block_height;
+    const size_t input_unit = static_cast<size_t>(block_rows) * input_row_pitch;
+    const size_t output_unit = static_cast<size_t>(layer_height) * pitch;
+    const auto decode_units = [&](u32 first, u32 count) {
+        size_t input_offset = first * input_unit;
+        size_t output_offset = first * output_unit;
+        for (u32 unit = first; unit < first + count; ++unit) {
+            for (u32 y = 0; y < layer_height; y += layer_block_height) {
+                size_t src_offset = input_offset;
+                size_t dst_offset = output_offset;
+                for (u32 x = 0; x < width; x += block_width) {
+                    const u8* src = input.data() + src_offset;
+                    u8* const dst = output.data() + dst_offset;
+                    if constexpr (IsSigned(pixel_format)) {
+                        decompress(src, dst, x, y, width, layer_height, is_signed);
+                    } else {
+                        decompress(src, dst, x, y, width, layer_height);
+                    }
+                    src_offset += block_size;
+                    dst_offset += block_width * out_bpp;
+                }
+                input_offset += input_row_pitch;
+                output_offset += static_cast<size_t>(
+                                     (std::min)(layer_block_height, layer_height - y)) *
+                                 pitch;
+            }
+        }
+    };
+    ForEachSliceRange(depth * layers, static_cast<size_t>(width) * layer_height, decode_units);
 }
 
 void SetBcGuestPalette(bool enabled) noexcept {
@@ -250,6 +329,120 @@ void DecompressBCn(std::span<const u8> input, std::span<u8> output, BufferImageC
     default:
         LOG_WARNING(HW_GPU, "Unimplemented BCn decompression {}", pixel_format);
     }
+}
+
+namespace {
+/// A non-negative half float as the 11-bit (6 mantissa bits) or 10-bit (5) float of
+/// R11G11B10_FLOAT, rounded to nearest. The 5-bit exponent is the same, so dropping low mantissa
+/// bits with a rounding carry is the whole conversion; overflow clamps to the largest finite
+/// value, negatives and NaN become 0 (unsigned BC6H decodes neither).
+u32 PackSmallFloat(u16 half, u32 mantissa_bits) noexcept {
+    const u32 exponent = (half >> 10) & 0x1F;
+    if ((half & 0x8000) != 0 || (exponent == 0x1F && (half & 0x3FF) != 0)) {
+        return 0;
+    }
+    const u32 drop = 10 - mantissa_bits;
+    const u32 max_finite = (0x1Eu << mantissa_bits) | ((1u << mantissa_bits) - 1);
+    if (exponent == 0x1F) {
+        return max_finite;
+    }
+    const u32 packed = (static_cast<u32>(half) + (1u << (drop - 1))) >> drop;
+    return (std::min)(packed, max_finite);
+}
+} // Anonymous namespace
+
+bool PacksBc6hAsR11G11B10(PixelFormat pixel_format, ImageType type) noexcept {
+    return type == ImageType::e3D && pixel_format == PixelFormat::BC6H_UFLOAT;
+}
+
+u32 ConvertedBytesPerBlock(PixelFormat pixel_format, ImageType type) {
+    return PacksBc6hAsR11G11B10(pixel_format, type) ? 4 : ConvertedBytesPerBlock(pixel_format);
+}
+
+void DecompressBCn(std::span<const u8> input, std::span<u8> output, BufferImageCopy& copy,
+                   PixelFormat pixel_format, ImageType type) {
+    if (!PacksBc6hAsR11G11B10(pixel_format, type)) {
+        DecompressBCn(input, output, copy, pixel_format);
+        return;
+    }
+    // Each 4x4 block decodes to RGBA16F in a 128-byte local buffer and goes straight into the
+    // output as R11G11B10, so no scratch is allocated: a background decode that allocated (and
+    // first touched) a few MiB per chunk on every thread faulted in hundreds of MiB per volume
+    // while the game loaded the area.
+    const u32 layers = static_cast<u32>((std::max)(copy.image_subresource.num_layers, 1));
+    const u32 width = copy.image_extent.width;
+    const u32 height = copy.image_extent.height;
+    if (width == 0 || height == 0) {
+        return;
+    }
+    const size_t out_pitch = static_cast<size_t>(width) * 4;
+    const size_t out_layer = out_pitch * height;
+    const size_t slice_texels = static_cast<size_t>(width) * height * layers;
+    const size_t input_row_pitch =
+        (static_cast<size_t>(copy.buffer_row_length) + BLOCK_SIZE - 1) / BLOCK_SIZE *
+        BlockSize(pixel_format);
+    const u32 block_rows = (height + BLOCK_SIZE - 1) / BLOCK_SIZE;
+    const size_t input_slice = static_cast<size_t>(layers) * block_rows * input_row_pitch;
+    const auto pack_slices = [&](u32 first, u32 count) {
+        std::array<u8, BLOCK_SIZE * BLOCK_SIZE * 8> block{};
+        for (u32 slice = first; slice < first + count; ++slice) {
+            for (u32 layer = 0; layer < layers; ++layer) {
+                for (u32 block_row = 0; block_row < block_rows; ++block_row) {
+                    const u8* const src_row = input.data() + slice * input_slice +
+                                              (static_cast<size_t>(layer) * block_rows +
+                                               block_row) * input_row_pitch;
+                    const u32 y = block_row * BLOCK_SIZE;
+                    const u32 rows = (std::min)(BLOCK_SIZE, height - y);
+                    u8* const dst_row = output.data() + slice * slice_texels * 4 +
+                                        layer * out_layer + y * out_pitch;
+                    for (u32 x = 0; x < width; x += BLOCK_SIZE) {
+                        bcn::DecodeBc6(src_row + (x / BLOCK_SIZE) * 16, block.data(), 0, 0,
+                                       BLOCK_SIZE, BLOCK_SIZE, false);
+                        const u32 cols = (std::min)(BLOCK_SIZE, width - x);
+                        for (u32 j = 0; j < rows; ++j) {
+                            u8* const out = dst_row + j * out_pitch + static_cast<size_t>(x) * 4;
+                            for (u32 i = 0; i < cols; ++i) {
+                                u16 rgb[3];
+                                std::memcpy(rgb, block.data() + (j * BLOCK_SIZE + i) * 8,
+                                            sizeof(rgb));
+                                const u32 packed = PackSmallFloat(rgb[0], 6) |
+                                                   (PackSmallFloat(rgb[1], 6) << 11) |
+                                                   (PackSmallFloat(rgb[2], 5) << 22);
+                                std::memcpy(out + i * 4, &packed, sizeof(packed));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    };
+    ForEachSliceRange(copy.image_extent.depth, slice_texels, pack_slices);
+}
+
+void SetBcDecodeSingleThreaded(bool single) noexcept {
+    single_threaded_decode = single;
+}
+
+size_t DecodedBcSliceBytes(const BufferImageCopy& copy, PixelFormat pixel_format, ImageType type) {
+    return static_cast<size_t>(copy.image_extent.width) * copy.image_extent.height *
+           static_cast<size_t>((std::max)(copy.image_subresource.num_layers, 1)) *
+           ConvertedBytesPerBlock(pixel_format, type);
+}
+
+void DecompressBCnSlices(std::span<const u8> input, std::span<u8> output,
+                         const BufferImageCopy& copy, PixelFormat pixel_format, ImageType type,
+                         u32 first_slice, u32 num_slices) {
+    // The same slice stride DecompressBlocks walks: every layer's rows of blocks.
+    const u32 layers = static_cast<u32>((std::max)(copy.image_subresource.num_layers, 1));
+    const size_t input_row_pitch =
+        (static_cast<size_t>(copy.buffer_row_length) + BLOCK_SIZE - 1) / BLOCK_SIZE *
+        BlockSize(pixel_format);
+    const size_t input_slice = static_cast<size_t>(layers) *
+                               ((copy.image_extent.height + BLOCK_SIZE - 1) / BLOCK_SIZE) *
+                               input_row_pitch;
+    BufferImageCopy part = copy;
+    part.image_extent.depth = num_slices;
+    DecompressBCn(input.subspan(first_slice * input_slice), output, part, pixel_format, type);
 }
 
 } // namespace VideoCommon
