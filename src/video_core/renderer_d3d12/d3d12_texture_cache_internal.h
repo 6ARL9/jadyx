@@ -140,7 +140,7 @@ inline std::atomic<bool> decode_bc_arrays{true};
 inline std::atomic<u8> decode_bc_3d{0};
 inline std::atomic<bool> probe_bc_volumes{false};
 inline std::atomic<bool> probe_bc_arrays{false};
-inline std::atomic<u8> bc_array_alias{1};
+inline std::atomic<u8> bc_array_alias{2};
 inline std::atomic<bool> gpu_astc_decode{true};
 inline std::atomic<bool> gpu_bc_decode{true};
 inline std::atomic<bool> gpu_unswizzle{true};

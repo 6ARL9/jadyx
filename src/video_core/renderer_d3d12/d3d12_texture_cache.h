@@ -901,8 +901,8 @@ void SetBcVolumeProbe(bool enabled);
 void SetBcArrayProbe(bool enabled);
 
 /// BC 2D arrays kept compressed instead of decoded (boot.cfg "bc_array_alias=0|1|2"): 0 decodes
-/// them as before, 1 (default) keeps the ones with one level, 2 also those with mipmaps whose
-/// levels are whole blocks. The copy engine writes them through an integer texture placed over
+/// them as before, 1 keeps the ones with one level, 2 (default) also those with mipmaps whose
+/// levels are whole blocks (the BC array probe read every level of 6 such shapes right). The copy engine writes them through an integer texture placed over
 /// the same memory (Image::BlockAlias). Applies to images created from now on.
 void SetBcArrayAlias(u8 mode);
 

@@ -854,9 +854,12 @@ Image::Image(TextureCacheRuntime& runtime_, const VideoCommon::ImageInfo& info_,
     {
         VideoCore::Perf::ScopedTimer timer{VideoCore::Perf::Counter::ResourceCreateUs,
                                            VideoCore::Perf::Counter::ResourcesCreated};
-        // Plain sampled textures may sit where the CPU writes them (SetCpuTextureWrites).
+        // Plain sampled textures may sit where the CPU writes them (SetCpuTextureWrites). Not a
+        // BC array kept compressed: WriteToSubresource lays out its layers right but takes up
+        // to 850 ms for 30 MiB of them (Metroid Prime Remastered's light maps, 0.4.4.5), where
+        // the copy through its block alias takes the copy engine's time.
         const bool plain = resource_flags == D3D12_RESOURCE_FLAG_NONE && !is_msaa &&
-                           !gpu_decoded && !gpu_bc_decoded;
+                           !gpu_decoded && !gpu_bc_decoded && !alias_blocks;
         auto allocated = runtime->texture_allocator.Create(
             desc, D3D12_RESOURCE_STATE_COMMON, nullptr,
             {.bytes = VideoCore::Surface::BytesPerBlock(format.copy_format),
