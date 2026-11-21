@@ -254,6 +254,18 @@ enum class Counter : size_t {
     IndexRangeKeeps,          ///< index ranges kept across a write elsewhere
     GpuPageMapMisses,         ///< "GPU modified" answered no by the page bitmap
     GpuPageMapRebuilds,
+    // Texture uploads by stage (detailed profile): the time and the process page faults of each,
+    // to tell first-touched memory from work. The unswizzle counter above sums read, unswizzle,
+    // block copies and conversion.
+    TextureUploadReadNs,         ///< reading the guest bytes (GpuGuestMemory)
+    TextureUploadReadFaults,
+    TextureUploadUnswizzleOnlyNs, ///< block-linear to linear only
+    TextureUploadUnswizzleFaults,
+    TextureUploadPreserveNs,     ///< keeping the guest blocks of a decoded image
+    TextureUploadPreserveFaults,
+    TextureUploadConvertFaults,  ///< decoding / re-encoding (time in TextureDecodeUs)
+    TextureUploadStagingFaults,  ///< getting the staging buffer
+    TextureUploadBackendFaults,  ///< the backend's upload (copies, in-place writes)
     Count,
 };
 
@@ -473,6 +485,32 @@ public:
 private:
     bool enabled{};
     std::chrono::steady_clock::time_point last{};
+};
+
+/// Page faults the process has taken (0 where the platform does not tell).
+[[nodiscard]] u64 ProcessPageFaults();
+
+/// Like LapTimer, for the process page faults between laps (detailed profile only).
+class FaultLap {
+public:
+    FaultLap() : enabled{DetailedGpuProfileEnabled()} {
+        if (enabled) {
+            last = ProcessPageFaults();
+        }
+    }
+
+    void Lap(Counter fault_counter) {
+        if (!enabled) {
+            return;
+        }
+        const u64 now = ProcessPageFaults();
+        Add(fault_counter, now - last);
+        last = now;
+    }
+
+private:
+    bool enabled{};
+    u64 last{};
 };
 
 /// Adds the scope's duration to a nanosecond counter.

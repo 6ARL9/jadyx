@@ -1625,6 +1625,7 @@ void TextureCache<P>::RefreshContents(Image& image, ImageId image_id) {
         return;
     }
     VideoCore::Perf::LapTimer timer;
+    VideoCore::Perf::FaultLap staging_faults;
     auto staging = [&] {
         const VideoCore::FrameTrace::ScopedSpan span{
             VideoCore::FrameTrace::Event::TextureUploadStaging, image.gpu_addr};
@@ -1637,6 +1638,7 @@ void TextureCache<P>::RefreshContents(Image& image, ImageId image_id) {
         return runtime.UploadStagingBuffer(size);
     }();
     timer.Lap(VideoCore::Perf::Counter::TextureCacheStagingNs);
+    staging_faults.Lap(VideoCore::Perf::Counter::TextureUploadStagingFaults);
     UploadImageContents(image, staging);
     runtime.InsertUploadMemoryBarrier();
 }
@@ -1664,20 +1666,28 @@ void TextureCache<P>::UploadImageContents(Image& image, StagingBuffer& staging) 
     }
 
     VideoCore::Perf::LapTimer timer;
+    VideoCore::Perf::LapTimer stage_timer;
+    VideoCore::Perf::FaultLap faults;
     VideoCore::FrameTrace::ScopedSpan trace_read{
         VideoCore::FrameTrace::Event::TextureUploadRead, gpu_addr};
     Tegra::Memory::GpuGuestMemory<u8, Tegra::Memory::GuestMemoryFlags::UnsafeRead> swizzle_data(
         *gpu_memory, gpu_addr, image.guest_size_bytes, &swizzle_data_buffer);
     trace_read.Finish();
+    stage_timer.Lap(VideoCore::Perf::Counter::TextureUploadReadNs);
+    faults.Lap(VideoCore::Perf::Counter::TextureUploadReadFaults);
     if (True(image.flags & ImageFlagBits::Converted)) {
         VideoCore::FrameTrace::ScopedSpan trace_unswizzle{
             VideoCore::FrameTrace::Event::TextureUploadUnswizzle, gpu_addr};
         unswizzle_data_buffer.resize_destructive(image.unswizzled_size_bytes);
         auto copies = FixSmallVectorADL(UnswizzleImage(*gpu_memory, gpu_addr, image.info, swizzle_data, unswizzle_data_buffer));
         trace_unswizzle.Finish();
+        stage_timer.Lap(VideoCore::Perf::Counter::TextureUploadUnswizzleOnlyNs);
+        faults.Lap(VideoCore::Perf::Counter::TextureUploadUnswizzleFaults);
         if constexpr (requires { image.PreserveGuestBlocks(unswizzle_data_buffer, copies); }) {
             image.PreserveGuestBlocks(unswizzle_data_buffer, copies);
         }
+        stage_timer.Lap(VideoCore::Perf::Counter::TextureUploadPreserveNs);
+        faults.Lap(VideoCore::Perf::Counter::TextureUploadPreserveFaults);
         {
             const VideoCore::FrameTrace::ScopedSpan trace_convert{
                 VideoCore::FrameTrace::Event::TextureUploadConvert, gpu_addr};
@@ -1685,10 +1695,12 @@ void TextureCache<P>::UploadImageContents(Image& image, StagingBuffer& staging) 
                 VideoCore::Perf::Counter::TextureDecodeUs};
             ConvertImage(unswizzle_data_buffer, image.info, mapped_span, copies);
         }
+        faults.Lap(VideoCore::Perf::Counter::TextureUploadConvertFaults);
         timer.Lap(VideoCore::Perf::Counter::TextureCacheUnswizzleNs);
         const VideoCore::FrameTrace::ScopedSpan trace_backend{
             VideoCore::FrameTrace::Event::TextureUploadBackend, gpu_addr};
         image.UploadMemory(staging, copies);
+        faults.Lap(VideoCore::Perf::Counter::TextureUploadBackendFaults);
     } else {
         VideoCore::FrameTrace::ScopedSpan trace_unswizzle{
             VideoCore::FrameTrace::Event::TextureUploadUnswizzle, gpu_addr};
@@ -1700,10 +1712,13 @@ void TextureCache<P>::UploadImageContents(Image& image, StagingBuffer& staging) 
         }
         const auto copies = FixSmallVectorADL(UnswizzleImage(*gpu_memory, gpu_addr, image.info, swizzle_data, mapped_span, host_layout));
         trace_unswizzle.Finish();
+        stage_timer.Lap(VideoCore::Perf::Counter::TextureUploadUnswizzleOnlyNs);
+        faults.Lap(VideoCore::Perf::Counter::TextureUploadUnswizzleFaults);
         timer.Lap(VideoCore::Perf::Counter::TextureCacheUnswizzleNs);
         const VideoCore::FrameTrace::ScopedSpan trace_backend{
             VideoCore::FrameTrace::Event::TextureUploadBackend, gpu_addr};
         image.UploadMemory(staging, copies);
+        faults.Lap(VideoCore::Perf::Counter::TextureUploadBackendFaults);
     }
     timer.Lap(VideoCore::Perf::Counter::TextureCacheBackendUploadNs);
 }

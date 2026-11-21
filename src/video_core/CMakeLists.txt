@@ -95,6 +95,7 @@ add_library(video_core STATIC
     macro.h
     fence_manager.h
     frame_trace.cpp
+    perf_faults.cpp
     cpu_write_queue.h
     buffer_cache/download_shadow.h
     geometry_hunt.cpp
