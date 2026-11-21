@@ -35,6 +35,7 @@
 #include "video_core/texture_cache/samples_helper.h"
 #include "video_core/texture_cache/texture_cache_base.h"
 #include "common/cityhash.h"
+#include "common/permafrost.h"
 #include "common/thread.h"
 #include "video_core/texture_cache/decode_bc.h"
 #include "video_core/texture_cache/util.h"
@@ -1968,6 +1969,9 @@ void TextureCache<P>::QueueAsyncDecode(Image& image, ImageId image_id) {
             Tegra::Texture::SetSwizzleSingleThreaded(true);
             guest.resize(guest_size);
             {
+                // Paused like the GPU thread while a swapped-out page is filled back in, so the
+                // copy never reads one of its pages still zero.
+                const Common::Permafrost::ScopedMemoryThread memory_thread;
                 u8* out = guest.data();
                 for (const GuestRange& range : ranges) {
                     if (range.address == 0) {
