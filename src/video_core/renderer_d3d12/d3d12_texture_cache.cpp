@@ -648,6 +648,10 @@ Image::Image(TextureCacheRuntime& runtime_, const VideoCommon::ImageInfo& info_,
                    (decode_bc_arrays.load(std::memory_order_relaxed) &&
                     info_.resources.layers > 1)))) {
         if (const std::optional<FormatInfo> decoded = DecodedBcFormat(info_.format, info_.type)) {
+            if (!bc_3d && !unaligned_bc_extent && !guest_palette &&
+                info_.resources.layers > 1) {
+                runtime_.RequestBcArrayProbe(info_);
+            }
             format = *decoded;
             // The compute shader writes the texels from the guest blocks on upload; the CPU
             // decode (ConvertImage on the GPU thread) took up to hundreds of ms on area loads.

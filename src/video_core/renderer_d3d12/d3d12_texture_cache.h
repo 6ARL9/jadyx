@@ -269,6 +269,8 @@ private:
         u32 depth;
         u32 next_variant{};
         bool waited{}; ///< logged that it waits for memory
+        bool array{};  ///< a 2D array of depth layers (bc_array_probe)
+        u32 block_bytes{16};
     };
     /// The one probe whose commands the GPU has not finished.
     struct BcVolumeProbe {
@@ -282,12 +284,20 @@ private:
         u32 slices;
         u32 variant;
         u32 salt;
+        bool array{};
+        u32 block_bytes{16};
+        ComPtr<ID3D12Resource> owned_texture; ///< committed or placed: not the allocator's
+        ComPtr<ID3D12Resource> uint_texture;  ///< the integer texture of the array variants
+        ComPtr<ID3D12Heap> heap;              ///< holds the aliased pair
     };
     /// Queues the probe of a BC6H 3D image's shape, once a shape. From the image's constructor.
     void RequestBcVolumeProbe(const VideoCommon::ImageInfo& image_info);
+    /// Queues the probe of a decoded BC 2D array's shape (bc_array_probe), once a shape.
+    void RequestBcArrayProbe(const VideoCommon::ImageInfo& image_info);
     /// Each frame: reads the finished probe back and logs it, or starts the next one.
     void TickBcVolumeProbes();
     void StartBcVolumeProbe(const BcVolumeShape& shape, u32 variant);
+    void StartBcArrayProbe(const BcVolumeShape& shape, u32 variant);
     void FinishBcVolumeProbe();
     std::vector<BcVolumeShape> bc_volume_shapes;
     std::optional<BcVolumeProbe> bc_volume_probe;
@@ -856,6 +866,11 @@ void SetBc3dDecode(u8 mode);
 /// off by default): scratch textures of that shape are written in several ways and read back
 /// through the texture unit, and the log says which ways read right. Measurement only.
 void SetBcVolumeProbe(bool enabled);
+
+/// Whether each shape of BC 2D array the emulator decodes is probed (boot.cfg "bc_array_probe=1";
+/// off by default): markers written into scratch arrays of that shape in several ways are read
+/// back through the texture unit, and the log says which ways read right. Measurement only.
+void SetBcArrayProbe(bool enabled);
 
 /// Whether ASTC images kept as RGBA8 are decoded by the compute shader (the default) rather than
 /// the CPU. Applies to images created from now on.

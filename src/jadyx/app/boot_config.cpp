@@ -426,6 +426,12 @@ void ParseBootConfigFile(const std::string& install_path, BootConfig& config) {
                                                     : "stay compressed"));
                 continue;
             }
+            if (line == "bc_array_probe=0" || line == "bc_array_probe=1") {
+                config.bc_array_probe = line.back() == '1';
+                WriteDiag(std::string{"boot.cfg: D3D12 BC array probe "} +
+                          (config.bc_array_probe ? "on" : "off"));
+                continue;
+            }
             if (line == "bc_volume_probe=0" || line == "bc_volume_probe=1") {
                 config.bc_volume_probe = line.back() == '1';
                 WriteDiag(std::string{"boot.cfg: D3D12 BC volume probe "} +

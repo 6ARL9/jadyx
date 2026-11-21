@@ -212,6 +212,9 @@ struct BootConfig {
     /// Probe how the console reads each shape of BC6H 3D texture a game creates
     /// ("bc_volume_probe=1"): measurement only, results in the log.
     bool bc_volume_probe{};
+    /// Probe how the console reads each shape of BC 2D array the emulator decodes
+    /// ("bc_array_probe=1"): measurement only, results in the log.
+    bool bc_array_probe{};
     /// Fine per-draw D3D12 CPU timers ("gpu_profile=1"). Off because clock reads are measurable.
     bool gpu_profile{};
     /// Writes every translated guest shader to the dump folder ("dump_guest_shaders=1").
