@@ -16,6 +16,7 @@
 #include <memory>
 #include <mutex>
 #include <numeric>
+#include <source_location>
 #include <span>
 #include <chrono>
 #include <deque>
@@ -508,7 +509,16 @@ private:
     /// feedback left.
     void GeoStaleFeedbackRange(DAddr device_addr, u64 size);
 
-    [[nodiscard]] BufferId FindBuffer(DAddr device_addr, u32 size, bool sparse_compatible);
+    /// A gigabyte or more is a 32-bit size that wrapped (an end below its start): nothing a game
+    /// binds is that large on a 4 GiB console, and no host can allocate it.
+    static constexpr u32 MAX_SANE_BUFFER_BYTES = 1U << 30;
+
+    /// Logs a binding or operation of a wrapped size that is left out; true when it is.
+    static bool WrappedSize(u64 size, const char* what, u64 address);
+
+    [[nodiscard]] BufferId FindBuffer(
+        DAddr device_addr, u32 size, bool sparse_compatible,
+        std::source_location caller = std::source_location::current());
 
     void SynchronizeBufferWrites(Buffer& buffer);
 

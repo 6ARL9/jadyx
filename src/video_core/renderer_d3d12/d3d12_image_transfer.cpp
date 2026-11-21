@@ -224,8 +224,13 @@ void Image::UploadMemoryImpl(ID3D12Resource* buffer, size_t base_offset, u8* map
     }
     // A fresh image in a CPU-writable heap: no GPU work has used it, and what uses it is recorded
     // after this, so the CPU writes the texels straight in. Later uploads may race the GPU.
+    // Never a 3D texture: on the Series the texture unit reads a volume written by
+    // WriteToSubresource wrong past its first 8 slices. The BC volume probe (bc_volume_probe=1)
+    // read 1080 of 1104 markers of a 512x256x368 BC6H volume wrong, most of them black, while
+    // every copy-engine upload of it read right: Metroid Prime Remastered's light volumes, the
+    // reason Samus's suit was black.
     if (std::exchange(untouched, false) && cpu_writable && mapped_at_base &&
-        WriteInPlace(mapped_at_base, copies)) {
+        info.type != ImageType::e3D && WriteInPlace(mapped_at_base, copies)) {
         return;
     }
     auto* const commands = runtime->scheduler.CommandList();

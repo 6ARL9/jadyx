@@ -398,7 +398,7 @@ bool BufferCache<P>::DMACopy(GPUVAddr src_address, GPUVAddr dest_address, u64 am
     geo_role = GeoHunt::Role::Other;
     const std::optional<DAddr> cpu_src_address = gpu_memory->GpuToCpuAddress(src_address);
     const std::optional<DAddr> cpu_dest_address = gpu_memory->GpuToCpuAddress(dest_address);
-    if (!cpu_src_address || !cpu_dest_address) {
+    if (!cpu_src_address || !cpu_dest_address || WrappedSize(amount, "DMA copy", src_address)) {
         return false;
     }
     const bool source_dirty = IsRegionRegistered(*cpu_src_address, amount);
@@ -466,7 +466,7 @@ template <class P>
 bool BufferCache<P>::DMAClear(GPUVAddr dst_address, u64 amount, u32 value) {
     geo_role = GeoHunt::Role::Other;
     const std::optional<DAddr> cpu_dst_address = gpu_memory->GpuToCpuAddress(dst_address);
-    if (!cpu_dst_address) {
+    if (!cpu_dst_address || WrappedSize(amount * sizeof(u32), "DMA clear", dst_address)) {
         return false;
     }
     const bool dest_dirty = IsRegionRegistered(*cpu_dst_address, amount);
@@ -1738,7 +1738,7 @@ void BufferCache<P>::UpdateIndexBuffer() {
     const u32 address_size = static_cast<u32>(gpu_addr_end - gpu_addr_begin);
     const u32 draw_size = (index_buffer_ref.count + index_buffer_ref.first) * u32(index_buffer_ref.FormatSizeInBytes());
     const u32 size = (std::min)(address_size, draw_size);
-    if (size == 0 || !device_addr) {
+    if (size == 0 || !device_addr || WrappedSize(size, "Index buffer", gpu_addr_begin)) {
         channel_state->index_buffer = NULL_BINDING;
         return;
     }
@@ -1792,6 +1792,11 @@ void BufferCache<P>::UpdateVertexBuffer(u32 index) {
     }
     if (!gpu_memory->IsWithinGPUAddressRange(gpu_addr_end) || size >= 64_MiB) {
         size = static_cast<u32>(gpu_memory->MaxContinuousRange(gpu_addr_begin, size));
+    }
+    if (size == 0 || WrappedSize(size, "Vertex buffer", gpu_addr_begin)) {
+        channel_state->vertex_buffers[index] = NULL_BINDING;
+        UpdateVertexBufferSlot(index, NULL_BINDING);
+        return;
     }
     const BufferId buffer_id = FindBuffer(*device_addr, size, false);
     const Binding binding{
@@ -1878,7 +1883,8 @@ void BufferCache<P>::UpdateTransformFeedbackBuffer(u32 index) {
     const GPUVAddr gpu_addr = binding.Address() + binding.start_offset;
     const u32 size = binding.size;
     const std::optional<DAddr> device_addr = gpu_memory->GpuToCpuAddress(gpu_addr);
-    if (binding.enable == 0 || size == 0 || !device_addr) {
+    if (binding.enable == 0 || size == 0 || !device_addr ||
+        WrappedSize(size, "Transform feedback buffer", gpu_addr)) {
         channel_state->transform_feedback_buffers[index] = NULL_BINDING;
         return;
     }
@@ -2022,9 +2028,31 @@ void BufferCache<P>::NoteWriteOrigin(ReadbackTrace::WriteOrigin origin, DAddr de
 }
 
 template <class P>
-BufferId BufferCache<P>::FindBuffer(DAddr device_addr, u32 size, bool sparse_compatible) {
+bool BufferCache<P>::WrappedSize(u64 size, const char* what, u64 address) {
+    if (size < MAX_SANE_BUFFER_BYTES) [[likely]] {
+        return false;
+    }
+    static std::atomic<u32> logged{};
+    if (logged.fetch_add(1, std::memory_order_relaxed) < 16) {
+        LOG_WARNING(HW_GPU, "{} of {} MiB at {:#x} is a size that wrapped; left out", what,
+                    size >> 20, address);
+    }
+    return true;
+}
+
+template <class P>
+BufferId BufferCache<P>::FindBuffer(DAddr device_addr, u32 size, bool sparse_compatible,
+                                    std::source_location caller) {
     if (device_addr == 0) {
         return NULL_BUFFER_ID;
+    }
+    if (size >= MAX_SANE_BUFFER_BYTES) [[unlikely]] {
+        // A wrapped size no guard above caught: name the caller, the next fix goes there.
+        static std::atomic<u32> logged{};
+        if (logged.fetch_add(1, std::memory_order_relaxed) < 16) {
+            LOG_WARNING(HW_GPU, "Buffer of {} MiB looked up at {:#x} from buffer_cache.h:{}",
+                        size >> 20, device_addr, caller.line());
+        }
     }
     const u64 page = device_addr >> CACHING_PAGEBITS;
     const BufferId buffer_id = page_table[page];
@@ -2802,8 +2830,9 @@ Binding BufferCache<P>::StorageBufferBinding(GPUVAddr ssbo_addr, u32 cbuf_index,
     }
 
     const auto size = [&]() {
-        const u32 memory_layout_size =
-            static_cast<u32>(gpu_memory->GetMemoryLayoutSize(gpu_addr));
+        // Saturated: cast down, more than 4 GiB of mapping would wrap to any size.
+        const u32 memory_layout_size = static_cast<u32>((std::min<u64>)(
+            gpu_memory->GetMemoryLayoutSize(gpu_addr), MAX_SANE_BUFFER_BYTES - 1));
         const u64 next_qword = gpu_memory->Read<u64>(ssbo_addr + 8);
         const u32 packed_size = static_cast<u32>(next_qword);
         const bool next_qword_is_size = static_cast<u32>(next_qword >> 32) == 0 &&
@@ -2831,6 +2860,11 @@ Binding BufferCache<P>::StorageBufferBinding(GPUVAddr ssbo_addr, u32 cbuf_index,
     // The end address used for size calculation does not need to be aligned
     const DAddr cpu_end = Common::AlignUp(*device_addr + size, Core::DEVICE_PAGESIZE);
 
+    if (cpu_end <= *aligned_device_addr ||
+        WrappedSize(cpu_end - *aligned_device_addr, "Storage buffer", gpu_addr)) {
+        // The aligned start and the end in different mappings: a range that would wrap.
+        return NULL_BINDING;
+    }
     u32 binding_size = static_cast<u32>(cpu_end - *aligned_device_addr);
     if (is_written) {
         binding_size = aligned_size;
@@ -2849,7 +2883,7 @@ TextureBufferBinding BufferCache<P>::GetTextureBufferBinding(GPUVAddr gpu_addr, 
                                                              PixelFormat format) {
     const std::optional<DAddr> device_addr = gpu_memory->GpuToCpuAddress(gpu_addr);
     TextureBufferBinding binding;
-    if (!device_addr || size == 0) {
+    if (!device_addr || size == 0 || WrappedSize(size, "Texture buffer", gpu_addr)) {
         binding.device_addr = 0;
         binding.size = 0;
         binding.buffer_id = NULL_BUFFER_ID;
