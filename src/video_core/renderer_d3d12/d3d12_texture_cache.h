@@ -261,6 +261,42 @@ private:
     };
     std::vector<AstcArrayProbe> astc_array_probes;
     u32 astc_array_probe_count{};
+    /// The BC volume probe (SetBcVolumeProbe, d3d12_bc_volume_probe.cpp): a shape of BC6H 3D
+    /// texture a game created, and the next way of writing it to try.
+    struct BcVolumeShape {
+        u32 width;
+        u32 height;
+        u32 depth;
+        u32 next_variant{};
+        bool waited{}; ///< logged that it waits for memory
+    };
+    /// The one probe whose commands the GPU has not finished.
+    struct BcVolumeProbe {
+        u64 tick;
+        TextureResourceAllocator::Resource texture; ///< scratch, released with the probe
+        ComPtr<ID3D12Resource> markers;  ///< upload heap: the volume's blocks, or one a 512 bytes
+        ComPtr<ID3D12Resource> results;  ///< UAV the shader writes
+        ComPtr<ID3D12Resource> readback; ///< results copied for the CPU
+        u32 width;
+        u32 height;
+        u32 slices;
+        u32 variant;
+        u32 salt;
+    };
+    /// Queues the probe of a BC6H 3D image's shape, once a shape. From the image's constructor.
+    void RequestBcVolumeProbe(const VideoCommon::ImageInfo& image_info);
+    /// Each frame: reads the finished probe back and logs it, or starts the next one.
+    void TickBcVolumeProbes();
+    void StartBcVolumeProbe(const BcVolumeShape& shape, u32 variant);
+    void FinishBcVolumeProbe();
+    std::vector<BcVolumeShape> bc_volume_shapes;
+    std::optional<BcVolumeProbe> bc_volume_probe;
+    u32 bc_volume_probe_count{};
+    u32 bc_volume_probe_wait{};
+    /// Bytes of CPU-decoded BC volumes created since pressure_snapshot read bc_3d_reserved_at
+    /// bytes in use: the snapshot is a frame old and a game creates two volumes in one.
+    u64 bc_3d_reserved{};
+    u64 bc_3d_reserved_at{};
     /// AccelerateImageUpload of a block-linear color image: each band of each level and layer is
     /// unswizzled into a scratch footprint and copied into the image.
     void UnswizzleImageUpload(Image& image, const StagingBufferRef& map,
@@ -815,6 +851,11 @@ void SetBcArrayDecode(bool enabled);
 /// with the layers of BC 2D arrays. Unsigned BC6H volumes are held as R11G11B10. Applies to
 /// images created from now on.
 void SetBc3dDecode(u8 mode);
+
+/// Whether each shape of BC6H 3D texture a game creates is probed (boot.cfg "bc_volume_probe=1";
+/// off by default): scratch textures of that shape are written in several ways and read back
+/// through the texture unit, and the log says which ways read right. Measurement only.
+void SetBcVolumeProbe(bool enabled);
 
 /// Whether ASTC images kept as RGBA8 are decoded by the compute shader (the default) rather than
 /// the CPU. Applies to images created from now on.

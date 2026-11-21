@@ -115,6 +115,8 @@ struct ArrayLayerProbe {
     u32 height;
     u32 layers;
     u32 levels;
+    /// The source is a Texture3D SRV of one level (d3d12_volume_probe.comp): layers is its depth.
+    bool volume = false;
 };
 
 /// One band of a block-linear 2D level (one layer) unswizzled into a copy footprint. The shader
@@ -273,6 +275,9 @@ public:
     [[nodiscard]] bool CanProbeArrayLayers() const noexcept {
         return array_probe_available;
     }
+    [[nodiscard]] bool CanProbeVolumes() const noexcept {
+        return volume_probe_available;
+    }
     /// The caller puts the image in NON_PIXEL_SHADER_RESOURCE and the buffer in UNORDERED_ACCESS.
     void ProbeArrayLayers(const ArrayLayerProbe& probe);
 
@@ -371,6 +376,9 @@ private:
     void CreateBc3Pipeline(const ShaderCompiler& compiler);
     /// Builds the array layer probe on the BC3 encoder's root signature; throws on failure.
     void CreateArrayProbePipeline(const ShaderCompiler& compiler);
+    /// The array layer probe's pipeline, or the one reading a 3D texture.
+    [[nodiscard]] ComPtr<ID3D12PipelineState> CreateProbePipeline(const ShaderCompiler& compiler,
+                                                                  bool volume);
     /// Builds the BCn decoder's pipeline on the ASTC root signature; throws on failure.
     void CreateBcnPipeline(const ShaderCompiler& compiler);
     /// Builds the block-linear unswizzle pipeline on the pack root signature; throws on failure.
@@ -406,6 +414,8 @@ private:
 
     ComPtr<ID3D12PipelineState> array_probe_pipeline;
     bool array_probe_available{};
+    ComPtr<ID3D12PipelineState> volume_probe_pipeline;
+    bool volume_probe_available{};
 
     ComPtr<ID3D12PipelineState> bcn_pipeline;
     bool bcn_available{};

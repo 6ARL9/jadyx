@@ -212,6 +212,12 @@ BlitImageHelper::BlitImageHelper(const Device& device_, Scheduler& scheduler_,
             LOG_ERROR(Render, "D3D12: array layer probe unavailable, ASTC arrays stay BC "
                       "unchecked: {}", exception.what());
         }
+        try {
+            volume_probe_pipeline = CreateProbePipeline(compiler, true);
+            volume_probe_available = true;
+        } catch (const std::exception& exception) {
+            LOG_ERROR(Render, "D3D12: volume probe unavailable: {}", exception.what());
+        }
     } catch (const std::exception& exception) {
         LOG_ERROR(Render, "D3D12: BC3 GPU encoder unavailable, recompressed ASTC uses the CPU: {}",
                   exception.what());

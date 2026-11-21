@@ -209,6 +209,9 @@ struct BootConfig {
     bool parallel_unswizzle{true};
     /// Keep one large staging upload buffer across frames ("keep_large_staging=0" turns it off).
     bool keep_large_staging{true};
+    /// Probe how the console reads each shape of BC6H 3D texture a game creates
+    /// ("bc_volume_probe=1"): measurement only, results in the log.
+    bool bc_volume_probe{};
     /// Fine per-draw D3D12 CPU timers ("gpu_profile=1"). Off because clock reads are measurable.
     bool gpu_profile{};
     /// Writes every translated guest shader to the dump folder ("dump_guest_shaders=1").

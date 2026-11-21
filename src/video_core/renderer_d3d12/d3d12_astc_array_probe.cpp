@@ -242,6 +242,7 @@ void TextureCacheRuntime::ProbeAstcArrayLayers(Image& image) {
 }
 
 void TextureCacheRuntime::PollAstcArrayProbes() {
+    TickBcVolumeProbes();
     std::erase_if(astc_array_probes, [&](AstcArrayProbe& probe) {
         if (!scheduler.IsFree(probe.tick)) {
             return false;

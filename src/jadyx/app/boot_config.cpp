@@ -426,6 +426,12 @@ void ParseBootConfigFile(const std::string& install_path, BootConfig& config) {
                                                     : "stay compressed"));
                 continue;
             }
+            if (line == "bc_volume_probe=0" || line == "bc_volume_probe=1") {
+                config.bc_volume_probe = line.back() == '1';
+                WriteDiag(std::string{"boot.cfg: D3D12 BC volume probe "} +
+                          (config.bc_volume_probe ? "on" : "off"));
+                continue;
+            }
             if (line == "keep_large_staging=0" || line == "keep_large_staging=1") {
                 config.keep_large_staging = line.back() == '1';
                 WriteDiag(std::string{"boot.cfg: one large staging upload buffer "} +

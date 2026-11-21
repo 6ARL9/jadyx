@@ -608,11 +608,41 @@ Image::Image(TextureCacheRuntime& runtime_, const VideoCommon::ImageInfo& info_,
     // BC 3D textures (SetBc3dDecode): the volume's depth slices may be misread like the layers of
     // a BC 2D array. The GPU decoder writes 2D arrays only, so these decode on the CPU.
     const u8 bc_3d_mode = decode_bc_3d.load(std::memory_order_relaxed);
-    const bool bc_3d = !native_blocks && info_.type == ImageType::e3D && info_.num_samples == 1 &&
-                       info_.size.depth > 1 &&
-                       (bc_3d_mode == 2 ||
-                        (bc_3d_mode == 1 && (info_.format == PixelFormat::BC6H_UFLOAT ||
-                                             info_.format == PixelFormat::BC6H_SFLOAT)));
+    bool bc_3d = !native_blocks && info_.type == ImageType::e3D && info_.num_samples == 1 &&
+                 info_.size.depth > 1 &&
+                 (bc_3d_mode == 2 ||
+                  (bc_3d_mode == 1 && (info_.format == PixelFormat::BC6H_UFLOAT ||
+                                       info_.format == PixelFormat::BC6H_SFLOAT)));
+    if (!native_blocks && info_.type == ImageType::e3D && info_.num_samples == 1 &&
+        info_.format == PixelFormat::BC6H_UFLOAT) {
+        runtime_.RequestBcVolumeProbe(info_);
+    }
+    if (bc_3d) {
+        // Decoded, a volume takes four times its blocks (Metroid Prime Remastered: 310 MiB for a
+        // 640x192x496 light volume, two of them in an area the game had already filled to 4.5 of
+        // the app's 5 GiB; the second failed to allocate and the game stopped). One that would
+        // not leave this much free stays compressed: the Series may read it wrong, but goes on.
+        static constexpr u64 DECODED_VOLUME_HEADROOM = 384ULL << 20;
+        const CacheMemorySnapshot& app_memory = runtime_.pressure_snapshot;
+        if (runtime_.bc_3d_reserved_at != app_memory.app_used) {
+            runtime_.bc_3d_reserved_at = app_memory.app_used;
+            runtime_.bc_3d_reserved = 0;
+        }
+        const u64 volume_bytes =
+            u64{info_.size.width} * info_.size.height * info_.size.depth * 4;
+        const u64 app_free = app_memory.AppFree() > runtime_.bc_3d_reserved
+                                 ? app_memory.AppFree() - runtime_.bc_3d_reserved
+                                 : 0;
+        if (runtime_.pressure_sampled && app_memory.app_limit != 0 &&
+            app_free < volume_bytes + DECODED_VOLUME_HEADROOM) {
+            bc_3d = false;
+            LOG_WARNING(Render, "D3D12: BC {} {}x{}x{} stays compressed: decoded it takes {} MiB "
+                        "and the app has {} MiB free", info_.format, info_.size.width,
+                        info_.size.height, info_.size.depth, volume_bytes >> 20, app_free >> 20);
+        } else {
+            runtime_.bc_3d_reserved += volume_bytes;
+        }
+    }
     if (bc_3d || (!native_blocks && info_.type == ImageType::e2D && info_.num_samples == 1 &&
                   (unaligned_bc_extent || guest_palette ||
                    (decode_bc_arrays.load(std::memory_order_relaxed) &&
