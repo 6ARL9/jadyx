@@ -203,6 +203,11 @@ void Image::UploadMemoryImpl(ID3D12Resource* buffer, size_t base_offset, u8* map
     }
     VideoCore::Perf::Add(VideoCore::Perf::Counter::TextureUploads, 1);
     VideoCore::Perf::Add(VideoCore::Perf::Counter::TextureUploadBytes, TransferBytes(copies));
+    if (cpu_writable) {
+        VideoCore::Perf::Add(VideoCore::Perf::Counter::CpuWritableUploads, 1);
+        VideoCore::Perf::Add(VideoCore::Perf::Counter::CpuWritableUploadBytes,
+                             TransferBytes(copies));
+    }
     if (VideoCommon::FullCapture::Active()) {
         // Every write into a texture during a capture: which subresources, from what source.
         std::string list;

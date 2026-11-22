@@ -136,6 +136,10 @@ void SetBcVolumeStreaming(bool enabled) {
     stream_bc_volumes.store(enabled, std::memory_order_relaxed);
 }
 
+void SetVolumesInGpuMemory(bool enabled) {
+    volumes_in_gpu_memory.store(enabled, std::memory_order_relaxed);
+}
+
 void SetAstcGpuDecode(bool enabled) {
     gpu_astc_decode.store(enabled, std::memory_order_relaxed);
 }
@@ -874,9 +878,12 @@ Image::Image(TextureCacheRuntime& runtime_, const VideoCommon::ImageInfo& info_,
         // Plain sampled textures may sit where the CPU writes them (SetCpuTextureWrites). Not a
         // BC array kept compressed: WriteToSubresource lays out its layers right but takes up
         // to 850 ms for 30 MiB of them (Metroid Prime Remastered's light maps, 0.4.4.5), where
-        // the copy through its block alias takes the copy engine's time.
+        // the copy through its block alias takes the copy engine's time. Nor a 3D texture: they
+        // go up by copy (WriteInPlace misreads BC volumes), so the CPU never writes them there.
         const bool plain = resource_flags == D3D12_RESOURCE_FLAG_NONE && !is_msaa &&
-                           !gpu_decoded && !gpu_bc_decoded && !alias_blocks;
+                           !gpu_decoded && !gpu_bc_decoded && !alias_blocks &&
+                           !(info_.type == ImageType::e3D &&
+                             volumes_in_gpu_memory.load(std::memory_order_relaxed));
         const auto create_begin = std::chrono::steady_clock::now();
         auto allocated = runtime->texture_allocator.Create(
             desc, D3D12_RESOURCE_STATE_COMMON, nullptr,

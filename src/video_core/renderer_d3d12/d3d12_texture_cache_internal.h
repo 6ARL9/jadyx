@@ -142,6 +142,8 @@ inline std::atomic<bool> probe_bc_volumes{false};
 inline std::atomic<bool> probe_bc_arrays{false};
 inline std::atomic<u8> bc_array_alias{2};
 inline std::atomic<bool> stream_bc_volumes{true};
+/// 3D textures in GPU memory, not in the CPU-writable heaps (SetVolumesInGpuMemory).
+inline std::atomic<bool> volumes_in_gpu_memory{true};
 inline std::atomic<bool> gpu_astc_decode{true};
 inline std::atomic<bool> gpu_bc_decode{true};
 inline std::atomic<bool> gpu_unswizzle{true};

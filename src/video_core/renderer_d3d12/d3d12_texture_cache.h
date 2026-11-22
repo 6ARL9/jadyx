@@ -910,6 +910,11 @@ void SetBcArrayAlias(u8 mode);
 /// a few slices a frame (boot.cfg "bc_volume_stream=0|1"; on by default) instead of whole on the
 /// GPU thread at every guest write. Applies to images created from now on.
 void SetBcVolumeStreaming(bool enabled);
+/// 3D textures go to GPU memory instead of the CPU-writable heaps ("volumes_in_gpu_memory=0" puts
+/// them back). They have been uploaded by copy since WriteInPlace misread BC volumes, so the CPU
+/// never writes them there: Metroid Prime Remastered's light volume parts went up into that
+/// memory and the GPU took 50 to 255 ms in some of those frames.
+void SetVolumesInGpuMemory(bool enabled);
 
 /// Whether ASTC images kept as RGBA8 are decoded by the compute shader (the default) rather than
 /// the CPU. Applies to images created from now on.

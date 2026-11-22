@@ -60,6 +60,9 @@ void ParseBootConfigFile(const std::string& install_path, BootConfig& config) {
             } else if (line == "buffer_heaps=1" || line == "buffer_heaps=0") {
                 config.buffer_heaps = line == "buffer_heaps=1";
                 WriteDiag("boot.cfg: " + line);
+            } else if (line == "volumes_in_gpu_memory=1" || line == "volumes_in_gpu_memory=0") {
+                config.volumes_in_gpu_memory = line == "volumes_in_gpu_memory=1";
+                WriteDiag("boot.cfg: " + line);
             } else if (line == "cpu_texture_writes=1" ||
                        line == "cpu_texture_writes=0") {
                 config.cpu_texture_writes = line == "cpu_texture_writes=1";
@@ -633,6 +636,7 @@ void ParseBootConfigFile(const std::string& install_path, BootConfig& config) {
                 line.starts_with("oom_reserve_mib=") ||
                 line.starts_with("spare_heaps=") ||
                 line.starts_with("buffer_heaps=") ||
+                line.starts_with("volumes_in_gpu_memory=") ||
                 line.starts_with("jit_thunks=") ||
                 line.starts_with("jit_shared_cache=") ||
                 line.starts_with("gpu_unswizzle=") ||

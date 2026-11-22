@@ -273,6 +273,8 @@ enum class Counter : size_t {
     BufferHeapsGrown,      ///< buffer heaps made on the creating thread (no room, none ahead)
     ImagesCreated,         ///< texture cache images
     ImageCreateUs,
+    CpuWritableUploads,     ///< texture uploads into images in the CPU-writable heaps
+    CpuWritableUploadBytes,
     Count,
 };
 

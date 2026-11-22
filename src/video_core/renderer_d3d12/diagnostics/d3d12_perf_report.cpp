@@ -653,14 +653,15 @@ void RendererD3D12::ReportPerf(double interval_ms) {
     LOG_INFO(Render,
              "Hitch GPU work: longest submission {:.1f} ms of {} | {} draws, {} dispatches | "
              "uploads {} ({:.2f} MiB, {} GPU-decoded), downloads {} ({:.2f} MiB) | local memory "
-             "{:.0f}/{:.0f} MiB",
+             "{:.0f}/{:.0f} MiB | uploads into CPU-writable memory {} ({:.2f} MiB)",
              longest_submit_ms, get(Counter::Submits), get(Counter::Draws),
              get(Counter::Dispatches), get(Counter::TextureUploads),
              static_cast<double>(get(Counter::TextureUploadBytes)) / MIB,
              get(Counter::TextureGpuDecodes), get(Counter::TextureDownloads),
              static_cast<double>(get(Counter::TextureDownloadBytes)) / MIB,
              static_cast<double>(memory.CurrentUsage) / MIB,
-             static_cast<double>(memory.Budget) / MIB);
+             static_cast<double>(memory.Budget) / MIB, get(Counter::CpuWritableUploads),
+             static_cast<double>(get(Counter::CpuWritableUploadBytes)) / MIB);
     if (VideoCore::Perf::DetailedGpuProfileEnabled()) {
         LOG_INFO(Render, "Hitch detail: {}", DescribeDrawCosts(delta, interval_ms));
         const auto stage_ms = [&](Counter counter) { return static_cast<double>(get(counter)) / 1e6; };

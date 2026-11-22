@@ -91,6 +91,8 @@ struct BootConfig {
     /// Guest buffers placed in pooled heaps instead of one committed resource each
     /// ("buffer_heaps=0" turns it off).
     bool buffer_heaps{true};
+    /// 3D textures in GPU memory, not the CPU-writable heaps ("volumes_in_gpu_memory=0|1").
+    bool volumes_in_gpu_memory{true};
     /// Block-linear color textures of 64 KiB and more unswizzled on the GPU on upload
     /// ("gpu_unswizzle=0" brings back the CPU).
     bool gpu_unswizzle{true};
