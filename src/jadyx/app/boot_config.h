@@ -218,6 +218,8 @@ struct BootConfig {
     /// BC 2D arrays kept compressed through an integer alias ("bc_array_alias=0|1|2"; 2 by
     /// default: mipmapped ones too).
     u8 bc_array_alias{2};
+    /// Large BC volumes read and uploaded in the background ("bc_volume_stream=0|1").
+    bool bc_volume_stream{true};
     /// Fine per-draw D3D12 CPU timers ("gpu_profile=1"). Off because clock reads are measurable.
     bool gpu_profile{};
     /// Writes every translated guest shader to the dump folder ("dump_guest_shaders=1").

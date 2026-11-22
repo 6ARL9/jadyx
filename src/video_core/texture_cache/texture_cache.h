@@ -1898,8 +1898,9 @@ u64 TextureCache<P>::GetScaledImageSizeBytes(const ImageBase& image) {
 
 template <class P>
 void TextureCache<P>::QueueAsyncDecode(Image& image, ImageId image_id) {
-    UNIMPLEMENTED_IF(False(image.flags & ImageFlagBits::Converted));
-    LOG_INFO(HW_GPU, "Queuing async texture decode");
+    // A BC volume kept compressed is streamed too, without the decode (the backend flags only
+    // large ones): the guest rewriting it piece by piece re-uploaded it whole on every write.
+    const bool converted = True(image.flags & ImageFlagBits::Converted);
 
     image.flags |= ImageFlagBits::IsDecoding;
     // Newer guest data supersedes a decode still running or still uploading its slices: its
@@ -1931,7 +1932,8 @@ void TextureCache<P>::QueueAsyncDecode(Image& image, ImageId image_id) {
     const bool stream =
         IsPixelFormatBCn(image.info.format) && image.info.type == ImageType::e3D &&
         image.info.resources.levels == 1 && image.info.resources.layers == 1 &&
-        image.info.size.depth > 1 && image.converted_size_bytes >= STREAMED_DECODE_MIN;
+        image.info.size.depth > 1 &&
+        (!converted || image.converted_size_bytes >= STREAMED_DECODE_MIN);
     if (stream) {
         // Only where the bytes are is worked out here, page by page (cheap); the worker copies
         // them. Copying 46 MiB per light volume on the GPU thread cost ~50 ms at each area load.
@@ -1969,7 +1971,8 @@ void TextureCache<P>::QueueAsyncDecode(Image& image, ImageId image_id) {
             }
         }
         decode_ptr->streaming = true;
-        auto stream_func = [info = image.info, gpu_addr = image.gpu_addr, previous_hash,
+        auto stream_func = [info = image.info, gpu_addr = image.gpu_addr, previous_hash, converted,
+                            block_bytes = VideoCore::Surface::BytesPerBlock(image.info.format),
                             unswizzled_size = image.unswizzled_size_bytes,
                             guest_size = image.guest_size_bytes, ranges = std::move(ranges),
                             guest = std::move(local_unswizzle_data_buffer),
@@ -2023,17 +2026,27 @@ void TextureCache<P>::QueueAsyncDecode(Image& image, ImageId image_id) {
             {
                 BufferImageCopy upload = copy;
                 upload.buffer_offset = 0;
-                upload.buffer_row_length = copy.image_extent.width;
-                upload.buffer_image_height = copy.image_extent.height;
+                if (converted) {
+                    // Decoded slices are tight; compressed ones keep the unswizzled rows.
+                    upload.buffer_row_length = copy.image_extent.width;
+                    upload.buffer_image_height = copy.image_extent.height;
+                }
                 std::scoped_lock lock{async_decode->mutex};
                 async_decode->stream_copy = upload;
             }
-            const size_t slice_bytes = DecodedBcSliceBytes(copy, info.format, info.type);
+            const size_t slice_bytes =
+                converted ? DecodedBcSliceBytes(copy, info.format, info.type)
+                          : size_t{Common::DivCeil(copy.buffer_row_length, 4U)} *
+                                Common::DivCeil(copy.buffer_image_height, 4U) * block_bytes;
             const u32 chunk_slices =
                 static_cast<u32>((std::max<size_t>)(STREAMED_DECODE_CHUNK / slice_bytes, 1));
             const std::span<const u8> blocks =
                 std::span<const u8>{*scratch}.subspan(copy.buffer_offset);
             const u32 depth = copy.image_extent.depth;
+            if (slice_bytes == 0 || (!converted && slice_bytes * depth > blocks.size())) {
+                finish(true, hash); // Not the layout promised: leave the image as it is.
+                return;
+            }
             bool stopped = false;
             for (u32 first = 0; first < depth; first += chunk_slices) {
                 if (async_decode->stop.load(std::memory_order_relaxed)) {
@@ -2050,7 +2063,13 @@ void TextureCache<P>::QueueAsyncDecode(Image& image, ImageId image_id) {
                     }
                 }
                 data.resize(slice_bytes * count);
-                DecompressBCnSlices(blocks, data, copy, info.format, info.type, first, count);
+                if (converted) {
+                    DecompressBCnSlices(blocks, data, copy, info.format, info.type, first,
+                                        count);
+                } else {
+                    std::memcpy(data.data(), blocks.data() + slice_bytes * first,
+                                slice_bytes * count);
+                }
                 std::scoped_lock lock{async_decode->mutex};
                 async_decode->ready_chunks.push_back({first, count, std::move(data)});
             }
@@ -2060,6 +2079,8 @@ void TextureCache<P>::QueueAsyncDecode(Image& image, ImageId image_id) {
         return;
     }
 
+    UNIMPLEMENTED_IF(!converted);
+    LOG_INFO(HW_GPU, "Queuing async texture decode");
     local_unswizzle_data_buffer.resize(image.unswizzled_size_bytes);
     Tegra::Memory::GpuGuestMemory<u8, Tegra::Memory::GuestMemoryFlags::UnsafeRead> swizzle_data(*gpu_memory, image.gpu_addr, image.guest_size_bytes, &swizzle_data_buffer);
     auto copies = UnswizzleImage(*gpu_memory, image.gpu_addr, image.info, swizzle_data, local_unswizzle_data_buffer);

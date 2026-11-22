@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <limits>
 #include <stdexcept>
 
@@ -69,6 +70,7 @@ ComPtr<ID3D12Resource> CreateCachedUpload(ID3D12Device* device, u64 size,
                                            VideoCore::Perf::Counter::ResourcesCreated};
         // The CPU writes every staged byte before the GPU reads it.
         const D3D12_HEAP_FLAGS heap_flags = NotZeroedFlag(device);
+        const auto create_begin = std::chrono::steady_clock::now();
         hr = device->CreateCommittedResource(&heap, heap_flags, &desc,
                                              D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
                                              IID_PPV_ARGS(&buffer));
@@ -76,6 +78,12 @@ ComPtr<ID3D12Resource> CreateCachedUpload(ID3D12Device* device, u64 size,
             hr = device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc,
                                                  D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
                                                  IID_PPV_ARGS(&buffer));
+        }
+        if (const auto create_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - create_begin).count();
+            create_ms >= 50) {
+            LOG_WARNING(Render, "D3D12: slow resource creation: {} ms for a {} KiB CPU-cached "
+                        "staging buffer", create_ms, size >> 10);
         }
     }
     if (hr == E_OUTOFMEMORY) {

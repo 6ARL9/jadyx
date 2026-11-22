@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include <atomic>
+#include <chrono>
 #include <stdexcept>
 #include <string>
 
@@ -65,12 +66,20 @@ ComPtr<ID3D12Resource> CreateCommittedBuffer(ID3D12Device* device, u64 size,
     if (size >= 128ULL * 1024 * 1024) {
         LOG_WARNING(Render, "D3D12: large buffer: {} MiB, {}", size / (1024 * 1024), what);
     }
+    const auto create_begin = std::chrono::steady_clock::now();
     HRESULT result = device->CreateCommittedResource(&heap, heap_flags, &desc, initial_state,
                                                      nullptr, IID_PPV_ARGS(&buffer));
     if (RefuseNotZeroed(heap_flags, result)) {
         result = device->CreateCommittedResource(
             &heap, heap_flags & ~D3D12_HEAP_FLAG_CREATE_NOT_ZEROED, &desc, initial_state,
             nullptr, IID_PPV_ARGS(&buffer));
+    }
+    // The hitch report counts creation time, not what was created.
+    if (const auto create_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - create_begin).count();
+        create_ms >= 50) {
+        LOG_WARNING(Render, "D3D12: slow resource creation: {} ms for a {} KiB buffer ({}, heap "
+                    "type {})", create_ms, size >> 10, what, static_cast<int>(heap_type));
     }
     if (hr) {
         *hr = result;

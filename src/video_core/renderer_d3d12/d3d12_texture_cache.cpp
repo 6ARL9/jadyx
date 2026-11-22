@@ -132,6 +132,10 @@ void SetBcArrayAlias(u8 mode) {
     bc_array_alias.store(mode, std::memory_order_relaxed);
 }
 
+void SetBcVolumeStreaming(bool enabled) {
+    stream_bc_volumes.store(enabled, std::memory_order_relaxed);
+}
+
 void SetAstcGpuDecode(bool enabled) {
     gpu_astc_decode.store(enabled, std::memory_order_relaxed);
 }
@@ -770,6 +774,17 @@ Image::Image(TextureCacheRuntime& runtime_, const VideoCommon::ImageInfo& info_,
         if (bc_3d) {
             flags |= VideoCommon::ImageFlagBits::AsynchronousDecode;
         }
+    } else if (stream_bc_volumes.load(std::memory_order_relaxed) &&
+               info_.type == ImageType::e3D && info_.num_samples == 1 &&
+               info_.resources.levels == 1 && info_.resources.layers == 1 &&
+               info_.size.depth > 1 && VideoCore::Surface::IsPixelFormatBCn(info_.format) &&
+               unswizzled_size_bytes >= (16ULL << 20)) {
+        // A large BC volume kept compressed: Metroid Prime Remastered rewrites its 29-58 MiB
+        // light volumes piece by piece on area loads, and each write re-uploaded them whole, up
+        // to 18 times (1 GiB) a frame for five frames (0.4.4.6). Read and unswizzled on the
+        // texture decoder thread instead, uploaded a few slices a frame; a write while one runs
+        // waits for it, and bytes that hash as the last upload's upload nothing.
+        flags |= VideoCommon::ImageFlagBits::AsynchronousDecode;
     }
     // Big block-linear color uploads: the CPU copies the guest bytes as they are and a compute
     // shader unswizzles them. Only where the host keeps the guest's texel blocks unchanged.
@@ -860,12 +875,25 @@ Image::Image(TextureCacheRuntime& runtime_, const VideoCommon::ImageInfo& info_,
         // the copy through its block alias takes the copy engine's time.
         const bool plain = resource_flags == D3D12_RESOURCE_FLAG_NONE && !is_msaa &&
                            !gpu_decoded && !gpu_bc_decoded && !alias_blocks;
+        const auto create_begin = std::chrono::steady_clock::now();
         auto allocated = runtime->texture_allocator.Create(
             desc, D3D12_RESOURCE_STATE_COMMON, nullptr,
             {.bytes = VideoCore::Surface::BytesPerBlock(format.copy_format),
              .width = block_w,
              .height = block_h},
             plain);
+        // The hitch report counts creation time, not what was created (heaps included).
+        if (const auto create_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - create_begin).count();
+            create_ms >= 50) {
+            LOG_WARNING(Render, "D3D12: slow resource creation: {} ms for a texture {} {}x{}x{} "
+                        "levels {} layers {} ({}, {}{})", create_ms, info_.format,
+                        info_.size.width, info_.size.height, info_.size.depth,
+                        info_.resources.levels, info_.resources.layers,
+                        allocated.placed ? "placed" : "committed",
+                        allocated.cpu_writable ? "CPU-writable" : "GPU-only",
+                        plain ? ", plain" : "");
+        }
         cpu_writable = allocated.cpu_writable;
         resource = std::move(allocated.resource);
         resource_allocation = std::move(allocated.allocation);

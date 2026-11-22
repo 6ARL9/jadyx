@@ -906,6 +906,11 @@ void SetBcArrayProbe(bool enabled);
 /// the same memory (Image::BlockAlias). Applies to images created from now on.
 void SetBcArrayAlias(u8 mode);
 
+/// Whether large BC volumes kept compressed are read, unswizzled and uploaded in the background
+/// a few slices a frame (boot.cfg "bc_volume_stream=0|1"; on by default) instead of whole on the
+/// GPU thread at every guest write. Applies to images created from now on.
+void SetBcVolumeStreaming(bool enabled);
+
 /// Whether ASTC images kept as RGBA8 are decoded by the compute shader (the default) rather than
 /// the CPU. Applies to images created from now on.
 void SetAstcGpuDecode(bool enabled);

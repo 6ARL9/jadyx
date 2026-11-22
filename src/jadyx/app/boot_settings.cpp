@@ -322,6 +322,7 @@ void ApplyBootConfig(const BootConfig& config, const BootSurface& surface, bool 
     D3D12::SetBcVolumeProbe(config.bc_volume_probe);
     D3D12::SetBcArrayProbe(config.bc_array_probe);
     D3D12::SetBcArrayAlias(config.bc_array_alias);
+    D3D12::SetBcVolumeStreaming(config.bc_volume_stream);
     Tegra::Texture::SetParallelUnswizzle(config.parallel_unswizzle);
     D3D12::SetTextureMemoryCap(u64{config.texture_cap_mib} << 20);
     D3D12::SetTextureMemoryLine(
