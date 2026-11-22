@@ -12,6 +12,7 @@
 #include "video_core/buffer_cache/buffer_cache_base.h"
 #include "video_core/buffer_cache/memory_tracker_base.h"
 #include "video_core/renderer_d3d12/d3d12_index_rewrite_cache.h"
+#include "video_core/renderer_d3d12/d3d12_buffer_heap_pool.h"
 #include "video_core/renderer_d3d12/d3d12_device.h"
 #include "video_core/renderer_d3d12/d3d12_staging_buffer_pool.h"
 #include "video_core/renderer_d3d12/d3d12_transfer_buffer_pool.h"
@@ -334,6 +335,8 @@ private:
     StagingBufferPool& staging;
     TransferBufferPool& transfer_buffers; ///< scratch for copies within one buffer
     Tegra::MaxwellDeviceMemoryManager& device_memory;
+    /// Where new host buffers are placed, instead of one committed resource each.
+    BufferHeapPool buffer_heaps;
     GuestDescriptorQueue* descriptor_queue{};
     std::vector<TracedBuffer>* trace_buffers{};
     u32 traced_uniforms{};

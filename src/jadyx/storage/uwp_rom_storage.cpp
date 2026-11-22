@@ -76,7 +76,11 @@ StorageFolder ResolveFolder(const StoragePath& path, std::string_view relative) 
     return folder;
 }
 
-std::atomic<bool> rom_cache_enabled{true};
+/// Off by default: on a USB hard drive the console already keeps recently read data in memory,
+/// so the cache only added its own 192 MiB to the app's commit (peak 4309 -> 4594 MiB) and read
+/// whole 256 KiB blocks on a miss. Metroid Prime Remastered: file read hitches over 100 ms took
+/// 54 ms a minute without it and 109 with it (read-ahead off).
+std::atomic<bool> rom_cache_enabled{false};
 /// Off by default: reading 4 MiB ahead of every in-order read took 6.75 GB off a USB hard drive
 /// in 23 minutes of Metroid Prime Remastered, 18% of it used, and the game's own reads waited
 /// behind it (file read hitches 62 -> 158 ms a minute).
@@ -105,7 +109,8 @@ bool ReadAt(HANDLE handle, u8* data, size_t length, u64 offset) {
 /// Games on external storage (a USB hard drive) are read through this: blocks already read
 /// come from memory (77% of them in Metroid Prime Remastered), and with rom_readahead=1 a reader
 /// going through a file in order has the next blocks read ahead by a background thread. Metroid Prime Remastered on a USB hard drive: reads took 1 to 110 ms
-/// each, 2.4 s of the hitches over 100 ms in 39 minutes. boot.cfg rom_cache=0 turns it off.
+/// each, 2.4 s of the hitches over 100 ms in 39 minutes. Off by default; boot.cfg rom_cache=1
+/// turns it on.
 class RomReadCache {
 public:
     static constexpr size_t BLOCK = 256 * 1024;

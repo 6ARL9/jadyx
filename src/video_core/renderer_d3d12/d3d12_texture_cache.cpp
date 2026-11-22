@@ -869,6 +869,8 @@ Image::Image(TextureCacheRuntime& runtime_, const VideoCommon::ImageInfo& info_,
     {
         VideoCore::Perf::ScopedTimer timer{VideoCore::Perf::Counter::ResourceCreateUs,
                                            VideoCore::Perf::Counter::ResourcesCreated};
+        VideoCore::Perf::ScopedTimer image_timer{VideoCore::Perf::Counter::ImageCreateUs,
+                                                 VideoCore::Perf::Counter::ImagesCreated};
         // Plain sampled textures may sit where the CPU writes them (SetCpuTextureWrites). Not a
         // BC array kept compressed: WriteToSubresource lays out its layers right but takes up
         // to 850 ms for 30 MiB of them (Metroid Prime Remastered's light maps, 0.4.4.5), where

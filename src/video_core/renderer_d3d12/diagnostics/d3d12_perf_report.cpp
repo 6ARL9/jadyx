@@ -109,13 +109,15 @@ std::string DescribePerf(const VideoCore::Perf::Snapshot& d, double interval_ms)
     const auto get = [&d](Counter counter) { return VideoCore::Perf::Get(d, counter); };
     return fmt::format(
         "GPU thread: idle {:.1f} ms, fence waits {} ({:.1f} ms), pipeline stalls {} ({:.1f} ms), "
-        "guest flushes {} ({:.1f} ms), new resources {} ({:.1f} ms), CPU texture decode {:.1f} ms, "
+        "guest flushes {} ({:.1f} ms), new resources {} ({:.1f} ms; cached buffers {}, {} placed; "
+        "images {}), CPU texture decode {:.1f} ms, "
         "residual estimate {:.1f} ms (scopes may overlap) | GPU busy {:.1f} ms, {} submits | {} draws, {} dispatches | "
         "uploads {} ({:.2f} MiB, {} GPU-decoded), downloads {} ({:.2f} MiB) | staging: {} "
         "dedicated ({:.2f} MiB), {} ring waits | texture replays {} ({} mismatched)",
         idle, get(Counter::FenceWaits), fence, get(Counter::PipelineStalls), pipelines,
-        get(Counter::GpuThreadFlushes), flushes, get(Counter::ResourcesCreated), creates, decodes,
-        work,
+        get(Counter::GpuThreadFlushes), flushes, get(Counter::ResourcesCreated), creates,
+        get(Counter::BufferCacheCreates), get(Counter::BufferCachePlaced),
+        get(Counter::ImagesCreated), decodes, work,
         Ms(d, Counter::GpuBusyUs), get(Counter::Submits), get(Counter::Draws),
         get(Counter::Dispatches), get(Counter::TextureUploads),
         static_cast<double>(get(Counter::TextureUploadBytes)) / (1024.0 * 1024.0),
@@ -597,7 +599,9 @@ void RendererD3D12::ReportPerf(double interval_ms) {
              "{} code invalidations), file reads {:.1f} ms ({}, {:.2f} MiB), cache GC {:.1f} ms "
              "({}), page faults {} | GPU thread: idle {:.1f} ms, fence waits {:.1f} ms, pipeline "
              "stalls {:.1f} ms ({}), guest readbacks {:.1f} ms ({}), new resources {:.1f} ms ({}), "
-             "CPU texture decode {:.1f} ms | game queued {} frames, GPU busy {:.1f} ms",
+             "CPU texture decode {:.1f} ms | game queued {} frames, GPU busy {:.1f} ms | new: "
+             "cached buffers {} ({:.1f} ms, {} placed, {} buffer heaps made), images {} "
+             "({:.1f} ms)",
              interval_ms, normal, HitchCauseName(static_cast<size_t>(cause)),
              at(HitchCause::JitCompile), host_delta.jit_compiles, host_delta.jit_invalidations,
              at(HitchCause::FileReads), host_delta.file_reads,
@@ -607,7 +611,10 @@ void RendererD3D12::ReportPerf(double interval_ms) {
              get(Counter::PipelineStalls), at(HitchCause::GuestReadback),
              get(Counter::GpuThreadFlushes), at(HitchCause::NewResources),
              get(Counter::ResourcesCreated), at(HitchCause::TextureDecode),
-             get(Counter::GuestFramesQueued), Ms(delta, Counter::GpuBusyUs));
+             get(Counter::GuestFramesQueued), Ms(delta, Counter::GpuBusyUs),
+             get(Counter::BufferCacheCreates), Ms(delta, Counter::BufferCacheCreateUs),
+             get(Counter::BufferCachePlaced), get(Counter::BufferHeapsGrown),
+             get(Counter::ImagesCreated), Ms(delta, Counter::ImageCreateUs));
     // What the game's side did in the frame. Per core: CPU time its host thread really ran,
     // time with no guest thread to run, and the rest (held in the host: locks, page faults,
     // waits inside the emulator, or the thread not getting a processor).

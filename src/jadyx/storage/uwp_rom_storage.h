@@ -27,7 +27,7 @@ std::vector<StorageBrowserEntry> BrowseStorageFolder(std::string_view path, std:
 std::uint64_t StorageFileStamp(std::string_view path);
 bool ConsumeStorageReadFailure();
 /// Whether games on external storage are read through a block cache with read-ahead
-/// (boot.cfg "rom_cache=0|1"; on by default).
+/// (boot.cfg "rom_cache=0|1"; off by default: it did worse than the console's own caching).
 void SetRomReadCache(bool enabled);
 /// Whether that cache also reads 4 MiB ahead of in-order reads (boot.cfg "rom_readahead=0|1";
 /// off by default: on a hard drive the game's own reads waited behind it).

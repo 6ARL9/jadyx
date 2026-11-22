@@ -88,6 +88,9 @@ struct BootConfig {
     /// A texture heap class that grew gets one spare heap made on another thread while memory
     /// is plentiful ("spare_heaps=0" turns it off).
     bool spare_heaps{true};
+    /// Guest buffers placed in pooled heaps instead of one committed resource each
+    /// ("buffer_heaps=0" turns it off).
+    bool buffer_heaps{true};
     /// Block-linear color textures of 64 KiB and more unswizzled on the GPU on upload
     /// ("gpu_unswizzle=0" brings back the CPU).
     bool gpu_unswizzle{true};
@@ -220,8 +223,8 @@ struct BootConfig {
     u8 bc_array_alias{2};
     /// Large BC volumes read and uploaded in the background ("bc_volume_stream=0|1").
     bool bc_volume_stream{true};
-    /// Games on external storage read through a block cache with read-ahead ("rom_cache=0|1").
-    bool rom_cache{true};
+    /// Games on external storage read through a block cache ("rom_cache=0|1"; off by default).
+    bool rom_cache{};
     /// The cache also reads ahead of in-order reads ("rom_readahead=0|1"; off by default).
     bool rom_readahead{};
     /// Fine per-draw D3D12 CPU timers ("gpu_profile=1"). Off because clock reads are measurable.

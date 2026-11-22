@@ -373,7 +373,7 @@ BufferCacheRuntime::BufferCacheRuntime(const Device& device_, Scheduler& schedul
                                        TransferBufferPool& transfer_buffers_,
                                        Tegra::MaxwellDeviceMemoryManager& device_memory_)
     : device{device_}, scheduler{scheduler_}, staging{staging_},
-      transfer_buffers{transfer_buffers_}, device_memory{device_memory_},
+      transfer_buffers{transfer_buffers_}, device_memory{device_memory_}, buffer_heaps{device_},
       uniform_upload_copy{uniform_upload_copy_enabled.load(std::memory_order_relaxed)},
       uniform_reuse{uniform_reuse_enabled.load(std::memory_order_relaxed)} {
     LOG_INFO(Render, "D3D12: buffer cache runtime ready (short uniform upload copy {}, uniform "
@@ -422,6 +422,19 @@ ComPtr<ID3D12Resource> BufferCacheRuntime::CreateDefaultBuffer(u64 size) {
         }
         ++recycle_misses;
     }
+    using VideoCore::Perf::Counter;
+    const auto create_begin = std::chrono::steady_clock::now();
+    // A range of a heap made earlier: committing each buffer took about 0.3 ms, 100 to 170 of
+    // them in one frame at Metroid Prime Remastered's room transitions.
+    if (ComPtr<ID3D12Resource> placed = buffer_heaps.Create(size)) {
+        const u64 elapsed = VideoCore::Perf::ElapsedUs(create_begin);
+        VideoCore::Perf::Add(Counter::ResourceCreateUs, elapsed);
+        VideoCore::Perf::Add(Counter::ResourcesCreated, 1);
+        VideoCore::Perf::Add(Counter::BufferCacheCreateUs, elapsed);
+        VideoCore::Perf::Add(Counter::BufferCacheCreates, 1);
+        VideoCore::Perf::Add(Counter::BufferCachePlaced, 1);
+        return placed;
+    }
     // Storage buffers and image buffers are UAVs.
     HRESULT hr = S_OK;
     const auto create = [&] {
@@ -441,11 +454,14 @@ ComPtr<ID3D12Resource> BufferCacheRuntime::CreateDefaultBuffer(u64 size) {
     if (!buffer) {
         ThrowIfFailed(hr, "CreateCommittedResource (buffer cache)");
     }
+    VideoCore::Perf::Add(Counter::BufferCacheCreateUs, VideoCore::Perf::ElapsedUs(create_begin));
+    VideoCore::Perf::Add(Counter::BufferCacheCreates, 1);
     return buffer;
 }
 
 void BufferCacheRuntime::TickFrame(Common::SlotVector<Buffer>&) noexcept {
     ++recycle_frame;
+    buffer_heaps.TickFrame();
     for (size_t i = 0; i < recycled.size();) {
         if (recycle_frame - recycled[i].frame < RECYCLED_FRAMES) {
             ++i;
@@ -457,8 +473,9 @@ void BufferCacheRuntime::TickFrame(Common::SlotVector<Buffer>&) noexcept {
         recycled.pop_back();
     }
     if (recycle_frame % 1800 == 0 && recycle_hits + recycle_misses != 0) {
-        LOG_INFO(Render, "D3D12: recycled cache buffers: {} reused, {} not found, {} kept ({} KiB)",
-                 recycle_hits, recycle_misses, recycled.size(), recycled_bytes / 1024);
+        LOG_INFO(Render, "D3D12: recycled cache buffers: {} reused, {} not found, {} kept ({} KiB); "
+                 "{}", recycle_hits, recycle_misses, recycled.size(), recycled_bytes / 1024,
+                 buffer_heaps.Report());
         recycle_hits = 0;
         recycle_misses = 0;
     }

@@ -41,7 +41,7 @@ enum class Counter : size_t {
     TextureUploadBytes,
     TextureDownloads,
     TextureDownloadBytes,
-    ResourcesCreated,   ///< committed resources created (images, staging, transfer buffers)
+    ResourcesCreated,   ///< resources created (images, staging, transfer and cached buffers)
     ResourceCreateUs,
     StagingDedicated,      ///< staging buffers created outside the stream ring
     StagingDedicatedBytes,
@@ -266,6 +266,13 @@ enum class Counter : size_t {
     TextureUploadConvertFaults,  ///< decoding / re-encoding (time in TextureDecodeUs)
     TextureUploadStagingFaults,  ///< getting the staging buffer
     TextureUploadBackendFaults,  ///< the backend's upload (copies, in-place writes)
+    // What the resources counted in ResourcesCreated were (always counted).
+    BufferCacheCreates,    ///< guest buffers given a new host buffer (not a recycled one)
+    BufferCacheCreateUs,
+    BufferCachePlaced,     ///< of those, placed in a pooled heap (BufferHeapPool)
+    BufferHeapsGrown,      ///< buffer heaps made on the creating thread (no room, none ahead)
+    ImagesCreated,         ///< texture cache images
+    ImageCreateUs,
     Count,
 };
 
