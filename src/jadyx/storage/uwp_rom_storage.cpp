@@ -77,6 +77,10 @@ StorageFolder ResolveFolder(const StoragePath& path, std::string_view relative) 
 }
 
 std::atomic<bool> rom_cache_enabled{true};
+/// Off by default: reading 4 MiB ahead of every in-order read took 6.75 GB off a USB hard drive
+/// in 23 minutes of Metroid Prime Remastered, 18% of it used, and the game's own reads waited
+/// behind it (file read hitches 62 -> 158 ms a minute).
+std::atomic<bool> rom_readahead_enabled{false};
 
 /// Reads [offset, offset + length) of an open file handle at that position. The file pointer
 /// is set and read under the caller's lock, if the handle is shared.
@@ -99,8 +103,8 @@ bool ReadAt(HANDLE handle, u8* data, size_t length, u64 offset) {
 }
 
 /// Games on external storage (a USB hard drive) are read through this: blocks already read
-/// come from memory, and a reader going through a file in order has the next blocks read ahead
-/// by a background thread. Metroid Prime Remastered on a USB hard drive: reads took 1 to 110 ms
+/// come from memory (77% of them in Metroid Prime Remastered), and with rom_readahead=1 a reader
+/// going through a file in order has the next blocks read ahead by a background thread. Metroid Prime Remastered on a USB hard drive: reads took 1 to 110 ms
 /// each, 2.4 s of the hitches over 100 ms in 39 minutes. boot.cfg rom_cache=0 turns it off.
 class RomReadCache {
 public:
@@ -110,6 +114,8 @@ public:
     static constexpr u64 LOW_FREE = 384ULL << 20;
     static constexpr u64 PREFETCH_BLOCKS = 16; ///< 4 MiB ahead of an in-order reader
     static constexpr size_t MAX_QUEUED = 8;
+    /// Evicted blocks kept for the next ones: fresh 256 KiB allocations fault their pages in.
+    static constexpr size_t MAX_SPARE = 32;
 
     static RomReadCache& Instance() {
         static RomReadCache cache;
@@ -171,10 +177,13 @@ public:
             const size_t run_bytes =
                 static_cast<size_t>(std::min<u64>(run * BLOCK, file_size - first_byte));
             // A run inside the request is read straight into it; one sticking out of it goes
-            // through a buffer.
+            // through a buffer kept by the thread (it only grows, so its pages stay in).
             const bool direct = first_byte >= offset && first_byte + run_bytes <= end;
-            std::vector<u8> buffer(direct ? 0 : run_bytes);
-            u8* const target = direct ? data + (first_byte - offset) : buffer.data();
+            thread_local std::vector<u8> run_buffer;
+            if (!direct && run_buffer.size() < run_bytes) {
+                run_buffer.resize(run_bytes);
+            }
+            u8* const target = direct ? data + (first_byte - offset) : run_buffer.data();
             const auto disk_begin = std::chrono::steady_clock::now();
             const bool read = read_disk(target, run_bytes, first_byte);
             disk_reads.fetch_add(1, std::memory_order_relaxed);
@@ -292,7 +301,12 @@ private:
                 const u32 block_size =
                     static_cast<u32>(std::min<size_t>(BLOCK, bytes_size - in_run));
                 Block& entry = it->second;
-                entry.bytes = std::make_unique<u8[]>(block_size);
+                if (block_size == BLOCK && !spare.empty()) {
+                    entry.bytes = std::move(spare.back());
+                    spare.pop_back();
+                } else {
+                    entry.bytes = std::make_unique_for_overwrite<u8[]>(block_size);
+                }
                 std::memcpy(entry.bytes.get(), bytes + in_run, block_size);
                 entry.size = block_size;
                 entry.ready = true;
@@ -327,6 +341,9 @@ private:
             lru.pop_back();
             if (it != blocks.end()) {
                 cached_bytes -= it->second.size;
+                if (it->second.size == BLOCK && spare.size() < MAX_SPARE) {
+                    spare.push_back(std::move(it->second.bytes));
+                }
                 blocks.erase(it);
             }
         }
@@ -335,6 +352,7 @@ private:
     void Work(std::stop_token stop) {
         SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
         std::unordered_map<std::wstring, HANDLE> handles;
+        std::vector<u8> prefetch_buffer;
         while (!stop.stop_requested()) {
             Request request;
             {
@@ -375,10 +393,13 @@ private:
                 const u64 first_byte = block * BLOCK;
                 const size_t run_bytes = static_cast<size_t>(
                     std::min<u64>(run * BLOCK, request.file_size - first_byte));
-                std::vector<u8> buffer(run_bytes);
-                const bool read = ReadAt(file_handle, buffer.data(), run_bytes, first_byte);
+                if (prefetch_buffer.size() < run_bytes) {
+                    prefetch_buffer.resize(run_bytes);
+                }
+                const bool read = ReadAt(file_handle, prefetch_buffer.data(), run_bytes,
+                                         first_byte);
                 prefetched_blocks.fetch_add(read ? run : 0, std::memory_order_relaxed);
-                Insert(request.file, block, run, buffer.data(), run_bytes, read, true);
+                Insert(request.file, block, run, prefetch_buffer.data(), run_bytes, read, true);
                 block += run;
             }
         }
@@ -425,6 +446,7 @@ private:
     std::condition_variable cv;
     std::unordered_map<Key, Block, KeyHash> blocks;
     std::list<Key> lru;
+    std::vector<std::unique_ptr<u8[]>> spare;
     size_t cached_bytes{};
     std::unordered_map<std::wstring, u32> file_ids;
     std::deque<Request> queue;
@@ -501,7 +523,8 @@ public:
             // In order with the previous read of this file: read the next blocks ahead.
             const u64 previous_end =
                 last_end.exchange(offset + length, std::memory_order_relaxed);
-            if (offset + RomReadCache::BLOCK >= previous_end &&
+            if (rom_readahead_enabled.load(std::memory_order_relaxed) &&
+                offset + RomReadCache::BLOCK >= previous_end &&
                 offset <= previous_end + RomReadCache::BLOCK) {
                 cache.Prefetch(cache_id, wide_path, size,
                                (offset + length + RomReadCache::BLOCK - 1) / RomReadCache::BLOCK,
@@ -751,6 +774,10 @@ void ScanFolder(StorageFolder folder, const std::string& token, const std::wstri
 
 void SetRomReadCache(bool enabled) {
     rom_cache_enabled.store(enabled, std::memory_order_relaxed);
+}
+
+void SetRomReadAhead(bool enabled) {
+    rom_readahead_enabled.store(enabled, std::memory_order_relaxed);
 }
 
 bool ConsumeStorageReadFailure() { return storage_read_failure.exchange(false); }

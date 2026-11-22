@@ -432,6 +432,12 @@ void ParseBootConfigFile(const std::string& install_path, BootConfig& config) {
                 WriteDiag(std::string{"boot.cfg: D3D12 BC array alias "} + line.back());
                 continue;
             }
+            if (line == "rom_readahead=0" || line == "rom_readahead=1") {
+                config.rom_readahead = line.back() == '1';
+                WriteDiag(std::string{"boot.cfg: ROM read-ahead "} +
+                          (config.rom_readahead ? "on" : "off"));
+                continue;
+            }
             if (line == "rom_cache=0" || line == "rom_cache=1") {
                 config.rom_cache = line.back() == '1';
                 WriteDiag(std::string{"boot.cfg: ROM read cache "} +

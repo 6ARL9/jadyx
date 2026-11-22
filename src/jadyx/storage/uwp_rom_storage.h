@@ -29,6 +29,9 @@ bool ConsumeStorageReadFailure();
 /// Whether games on external storage are read through a block cache with read-ahead
 /// (boot.cfg "rom_cache=0|1"; on by default).
 void SetRomReadCache(bool enabled);
+/// Whether that cache also reads 4 MiB ahead of in-order reads (boot.cfg "rom_readahead=0|1";
+/// off by default: on a hard drive the game's own reads waited behind it).
+void SetRomReadAhead(bool enabled);
 // Bounded preflight, run on an MTA worker before starting the guest. Reports
 // access/removal errors in the library instead of closing the application.
 std::string CheckExternalGame(std::string_view path);

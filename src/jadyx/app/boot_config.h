@@ -222,6 +222,8 @@ struct BootConfig {
     bool bc_volume_stream{true};
     /// Games on external storage read through a block cache with read-ahead ("rom_cache=0|1").
     bool rom_cache{true};
+    /// The cache also reads ahead of in-order reads ("rom_readahead=0|1"; off by default).
+    bool rom_readahead{};
     /// Fine per-draw D3D12 CPU timers ("gpu_profile=1"). Off because clock reads are measurable.
     bool gpu_profile{};
     /// Writes every translated guest shader to the dump folder ("dump_guest_shaders=1").
