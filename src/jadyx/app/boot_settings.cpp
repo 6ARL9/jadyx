@@ -325,6 +325,7 @@ void ApplyBootConfig(const BootConfig& config, const BootSurface& surface, bool 
     D3D12::SetBcArrayAlias(config.bc_array_alias);
     D3D12::SetBcVolumeStreaming(config.bc_volume_stream);
     D3D12::SetVolumesInGpuMemory(config.volumes_in_gpu_memory);
+    D3D12::SetVolumeUploadBudget(config.volume_upload_mib);
     SetRomReadCache(config.rom_cache);
     SetRomReadAhead(config.rom_readahead);
     Tegra::Texture::SetParallelUnswizzle(config.parallel_unswizzle);

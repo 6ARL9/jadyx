@@ -48,6 +48,7 @@ void SetBcArrayProbe(bool enabled); // d3d12_texture_cache.h
 void SetBcArrayAlias(u8 mode); // d3d12_texture_cache.h
 void SetBcVolumeStreaming(bool enabled); // d3d12_texture_cache.h
 void SetVolumesInGpuMemory(bool enabled); // d3d12_texture_cache.h
+void SetVolumeUploadBudget(u32 mib); // d3d12_texture_cache.h
 void SetAstcGpuDecode(bool enabled); // d3d12_texture_cache.h
 void SetBcGpuDecode(bool enabled); // d3d12_texture_cache.h
 void SetNotZeroedHeaps(bool enabled); // d3d12_resource_utils.h

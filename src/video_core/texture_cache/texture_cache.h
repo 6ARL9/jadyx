@@ -2129,7 +2129,8 @@ void TextureCache<P>::TickAsyncDecode() {
     // 512x256x368 light volume): creating it and first writing it stalled the frame ~100 ms.
     constexpr size_t SLICED_UPLOAD_MIN = 32_MiB;
     constexpr size_t SLICED_UPLOAD_CHUNK = 16_MiB;
-    size_t frame_budget = 32_MiB;
+    size_t frame_budget =
+        size_t{streamed_volume_budget_mib.load(std::memory_order_relaxed)} * 1_MiB;
     // Keeps the input of a finished decode for the next one (two at most, none of them huge).
     const auto recycle_input = [this](AsyncDecodeContext& async_decode) {
         if (async_decode_inputs.size() < 2 && async_decode.input.capacity() <= 64_MiB) {
@@ -2153,7 +2154,14 @@ void TextureCache<P>::TickAsyncDecode() {
                     BufferImageCopy part = async_decode->stream_copy;
                     part.image_offset.z = static_cast<s32>(chunk.first_slice);
                     part.image_extent.depth = chunk.num_slices;
+                    // Timed on the GPU where the backend can: is the copy itself slow?
+                    if constexpr (requires { runtime.BeginGpuSection(); }) {
+                        runtime.BeginGpuSection();
+                    }
                     image.UploadMemory(staging, std::span<const BufferImageCopy>{&part, 1});
+                    if constexpr (requires { runtime.EndGpuSection(); }) {
+                        runtime.EndGpuSection();
+                    }
                     frame_budget =
                         chunk.data.size() >= frame_budget ? 0 : frame_budget - chunk.data.size();
                     has_uploads = true;

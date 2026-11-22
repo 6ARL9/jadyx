@@ -275,6 +275,8 @@ enum class Counter : size_t {
     ImageCreateUs,
     CpuWritableUploads,     ///< texture uploads into images in the CPU-writable heaps
     CpuWritableUploadBytes,
+    GpuSections,            ///< streamed volume copies timed on the GPU (Scheduler::BeginSection)
+    GpuSectionUs,
     Count,
 };
 

@@ -92,6 +92,10 @@ public:
     /// Where shader blits go (set by the renderer once the helper exists; null means skip).
     void SetBlitHelper(BlitImageHelper* helper) noexcept { blit_helper = helper; }
     StagingBufferRef UploadStagingBuffer(size_t size, bool deferred = false);
+
+    /// GPU timestamps around a streamed volume copy (Scheduler::BeginSection).
+    void BeginGpuSection();
+    void EndGpuSection();
     /// Copy footprint layout uploads are unswizzled into, so they need no repack.
     VideoCommon::HostRowLayout UploadRowLayout() const noexcept {
         return {D3D12_TEXTURE_DATA_PITCH_ALIGNMENT, D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT};
@@ -910,11 +914,13 @@ void SetBcArrayAlias(u8 mode);
 /// a few slices a frame (boot.cfg "bc_volume_stream=0|1"; on by default) instead of whole on the
 /// GPU thread at every guest write. Applies to images created from now on.
 void SetBcVolumeStreaming(bool enabled);
-/// 3D textures go to GPU memory instead of the CPU-writable heaps ("volumes_in_gpu_memory=0" puts
-/// them back). They have been uploaded by copy since WriteInPlace misread BC volumes, so the CPU
-/// never writes them there: Metroid Prime Remastered's light volume parts went up into that
-/// memory and the GPU took 50 to 255 ms in some of those frames.
+/// 3D textures go to GPU memory instead of the CPU-writable heaps ("volumes_in_gpu_memory=1"; off
+/// by default). Tried in 0.4.4.11 against the slow GPU frames during Metroid Prime Remastered's
+/// light volume uploads: those stayed (77 to 162 ms with nothing uploaded into CPU-writable
+/// memory), and the volumes took 64 MiB texture blocks, made on the frame seven times as often.
 void SetVolumesInGpuMemory(bool enabled);
+/// Streamed volume parts uploaded per frame, in MiB (VideoCommon::streamed_volume_budget_mib).
+void SetVolumeUploadBudget(u32 mib);
 
 /// Whether ASTC images kept as RGBA8 are decoded by the compute shader (the default) rather than
 /// the CPU. Applies to images created from now on.

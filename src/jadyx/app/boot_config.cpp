@@ -63,6 +63,18 @@ void ParseBootConfigFile(const std::string& install_path, BootConfig& config) {
             } else if (line == "volumes_in_gpu_memory=1" || line == "volumes_in_gpu_memory=0") {
                 config.volumes_in_gpu_memory = line == "volumes_in_gpu_memory=1";
                 WriteDiag("boot.cfg: " + line);
+            } else if (line.starts_with("volume_upload_mib=")) {
+                const auto value = line.substr(18);
+                unsigned long parsed{};
+                const auto result = std::from_chars(
+                    value.data(), value.data() + value.size(), parsed);
+                if (result.ec == std::errc{} &&
+                    result.ptr == value.data() + value.size() && parsed >= 1 && parsed <= 64) {
+                    config.volume_upload_mib = static_cast<u32>(parsed);
+                    WriteDiag("boot.cfg: " + line);
+                } else {
+                    WriteDiag("boot.cfg: invalid volume_upload_mib, ignored");
+                }
             } else if (line == "cpu_texture_writes=1" ||
                        line == "cpu_texture_writes=0") {
                 config.cpu_texture_writes = line == "cpu_texture_writes=1";
@@ -637,6 +649,7 @@ void ParseBootConfigFile(const std::string& install_path, BootConfig& config) {
                 line.starts_with("spare_heaps=") ||
                 line.starts_with("buffer_heaps=") ||
                 line.starts_with("volumes_in_gpu_memory=") ||
+                line.starts_with("volume_upload_mib=") ||
                 line.starts_with("jit_thunks=") ||
                 line.starts_with("jit_shared_cache=") ||
                 line.starts_with("gpu_unswizzle=") ||

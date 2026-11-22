@@ -121,6 +121,54 @@ void Scheduler::CreateTimestamps() {
     }
     timestamp_data = static_cast<const u64*>(mapped);
     timestamp_us_per_tick = 1'000'000.0 / static_cast<double>(frequency);
+
+    const D3D12_QUERY_HEAP_DESC section_desc{.Type = D3D12_QUERY_HEAP_TYPE_TIMESTAMP,
+                                             .Count = SECTION_SLOTS * 2, .NodeMask = 0};
+    D3D12_RESOURCE_DESC section_buffer = desc;
+    section_buffer.Width = SECTION_SLOTS * 2 * sizeof(u64);
+    void* section_mapped = nullptr;
+    if (FAILED(dev->CreateQueryHeap(&section_desc, IID_PPV_ARGS(&section_heap))) ||
+        FAILED(dev->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &section_buffer,
+                                            D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                                            IID_PPV_ARGS(&section_readback))) ||
+        FAILED(section_readback->Map(0, nullptr, &section_mapped))) {
+        section_heap.Reset();
+        section_readback.Reset();
+        return;
+    }
+    section_data = static_cast<const u64*>(section_mapped);
+}
+
+void Scheduler::BeginSection() {
+    if (!section_data || section_open) {
+        return;
+    }
+    {
+        std::scoped_lock lock{timestamp_mutex};
+        if (pending_sections.size() + list_sections.size() >= SECTION_SLOTS) {
+            return; // every slot still waits for the GPU: this one goes unmeasured
+        }
+    }
+    section_slot = section_next;
+    section_next = (section_next + 1) % SECTION_SLOTS;
+    stream->EndQuery(section_heap.Get(), D3D12_QUERY_TYPE_TIMESTAMP, section_slot * 2);
+    section_open = true;
+}
+
+void Scheduler::EndSection() {
+    if (!section_open) {
+        return;
+    }
+    section_open = false;
+    stream->EndQuery(section_heap.Get(), D3D12_QUERY_TYPE_TIMESTAMP, section_slot * 2 + 1);
+    stream->ResolveQueryData(section_heap.Get(), D3D12_QUERY_TYPE_TIMESTAMP, section_slot * 2, 2,
+                             section_readback.Get(), section_slot * 2 * sizeof(u64));
+    list_sections.push_back(section_slot);
+}
+
+u64 Scheduler::TakeLongestSectionUs() {
+    std::scoped_lock lock{timestamp_mutex};
+    return std::exchange(longest_section_us, 0);
 }
 
 void Scheduler::BeginTimestamp() {
@@ -141,6 +189,14 @@ void Scheduler::BeginTimestamp() {
 }
 
 void Scheduler::EndTimestamp(u64 tick) {
+    EndSection();
+    if (!list_sections.empty()) {
+        std::scoped_lock lock{timestamp_mutex};
+        for (const u32 slot : list_sections) {
+            pending_sections.emplace_back(tick, slot);
+        }
+        list_sections.clear();
+    }
     if (!timestamp_open) {
         return;
     }
@@ -167,6 +223,19 @@ void Scheduler::ReadTimestamps(u64 gpu_tick) {
                 static_cast<u64>(static_cast<double>(end - begin) * timestamp_us_per_tick);
             VideoCore::Perf::Add(VideoCore::Perf::Counter::GpuBusyUs, us);
             longest_submit_us = (std::max)(longest_submit_us, us);
+        }
+    }
+    while (!pending_sections.empty() && pending_sections.front().first <= gpu_tick) {
+        const u32 slot = pending_sections.front().second;
+        pending_sections.pop_front();
+        const u64 begin = section_data[slot * 2];
+        const u64 end = section_data[slot * 2 + 1];
+        if (end > begin) {
+            const u64 us =
+                static_cast<u64>(static_cast<double>(end - begin) * timestamp_us_per_tick);
+            VideoCore::Perf::Add(VideoCore::Perf::Counter::GpuSectionUs, us);
+            VideoCore::Perf::Add(VideoCore::Perf::Counter::GpuSections, 1);
+            longest_section_us = (std::max)(longest_section_us, us);
         }
     }
 }

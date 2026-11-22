@@ -487,6 +487,8 @@ void RendererD3D12::ReportPerf(double interval_ms) {
     hitch.host = host;
     // Every frame, so a hitch names only its own submissions.
     const double longest_submit_ms = static_cast<double>(scheduler.TakeLongestSubmitUs()) / 1000.0;
+    const double longest_section_ms =
+        static_cast<double>(scheduler.TakeLongestSectionUs()) / 1000.0;
     const u64 longest_call =
         Common::HostStalls::longest_guest_call.exchange(0, std::memory_order_relaxed);
     const u64 longest_request =
@@ -653,7 +655,8 @@ void RendererD3D12::ReportPerf(double interval_ms) {
     LOG_INFO(Render,
              "Hitch GPU work: longest submission {:.1f} ms of {} | {} draws, {} dispatches | "
              "uploads {} ({:.2f} MiB, {} GPU-decoded), downloads {} ({:.2f} MiB) | local memory "
-             "{:.0f}/{:.0f} MiB | uploads into CPU-writable memory {} ({:.2f} MiB)",
+             "{:.0f}/{:.0f} MiB | uploads into CPU-writable memory {} ({:.2f} MiB) | volume "
+             "copies timed {} ({:.1f} ms GPU, longest {:.1f} ms)",
              longest_submit_ms, get(Counter::Submits), get(Counter::Draws),
              get(Counter::Dispatches), get(Counter::TextureUploads),
              static_cast<double>(get(Counter::TextureUploadBytes)) / MIB,
@@ -661,7 +664,8 @@ void RendererD3D12::ReportPerf(double interval_ms) {
              static_cast<double>(get(Counter::TextureDownloadBytes)) / MIB,
              static_cast<double>(memory.CurrentUsage) / MIB,
              static_cast<double>(memory.Budget) / MIB, get(Counter::CpuWritableUploads),
-             static_cast<double>(get(Counter::CpuWritableUploadBytes)) / MIB);
+             static_cast<double>(get(Counter::CpuWritableUploadBytes)) / MIB,
+             get(Counter::GpuSections), Ms(delta, Counter::GpuSectionUs), longest_section_ms);
     if (VideoCore::Perf::DetailedGpuProfileEnabled()) {
         LOG_INFO(Render, "Hitch detail: {}", DescribeDrawCosts(delta, interval_ms));
         const auto stage_ms = [&](Counter counter) { return static_cast<double>(get(counter)) / 1e6; };

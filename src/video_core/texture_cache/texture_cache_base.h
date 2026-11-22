@@ -58,6 +58,11 @@ using Tegra::Texture::TSCEntry;
 using VideoCore::Surface::PixelFormat;
 using namespace Common::Literals;
 
+/// Streamed volume parts uploaded per frame, in MiB ("volume_upload_mib=N", 1 to 64; 6 by
+/// default, one part of up to 8 MiB a frame). At 32 MiB (five or six parts a frame) Metroid Prime
+/// Remastered's GPU took 50 to 255 ms in some of those frames.
+inline std::atomic<u32> streamed_volume_budget_mib{6};
+
 /// Draws whose render target registers are clean skip preparing the bound attachments again while
 /// no image changed in a way that preparing them would act on (default; boot.cfg "rt_early_out=0"
 /// prepares them on every draw).
