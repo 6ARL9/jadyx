@@ -60,6 +60,30 @@ void ParseBootConfigFile(const std::string& install_path, BootConfig& config) {
             } else if (line == "buffer_heaps=1" || line == "buffer_heaps=0") {
                 config.buffer_heaps = line == "buffer_heaps=1";
                 WriteDiag("boot.cfg: " + line);
+            } else if (line.starts_with("buffer_heap_max_mib=")) {
+                const auto value = line.substr(20);
+                unsigned long parsed{};
+                const auto result = std::from_chars(
+                    value.data(), value.data() + value.size(), parsed);
+                if (result.ec == std::errc{} &&
+                    result.ptr == value.data() + value.size() && parsed >= 1 && parsed <= 16) {
+                    config.buffer_heap_max_mib = static_cast<u32>(parsed);
+                    WriteDiag("boot.cfg: " + line);
+                } else {
+                    WriteDiag("boot.cfg: invalid buffer_heap_max_mib, ignored");
+                }
+            } else if (line.starts_with("idle_heap_seconds=")) {
+                const auto value = line.substr(18);
+                unsigned long parsed{};
+                const auto result = std::from_chars(
+                    value.data(), value.data() + value.size(), parsed);
+                if (result.ec == std::errc{} &&
+                    result.ptr == value.data() + value.size() && parsed <= 600) {
+                    config.idle_heap_seconds = static_cast<u32>(parsed);
+                    WriteDiag("boot.cfg: " + line);
+                } else {
+                    WriteDiag("boot.cfg: invalid idle_heap_seconds, ignored");
+                }
             } else if (line == "volumes_in_gpu_memory=1" || line == "volumes_in_gpu_memory=0") {
                 config.volumes_in_gpu_memory = line == "volumes_in_gpu_memory=1";
                 WriteDiag("boot.cfg: " + line);
@@ -648,6 +672,8 @@ void ParseBootConfigFile(const std::string& install_path, BootConfig& config) {
                 line.starts_with("oom_reserve_mib=") ||
                 line.starts_with("spare_heaps=") ||
                 line.starts_with("buffer_heaps=") ||
+                line.starts_with("buffer_heap_max_mib=") ||
+                line.starts_with("idle_heap_seconds=") ||
                 line.starts_with("volumes_in_gpu_memory=") ||
                 line.starts_with("volume_upload_mib=") ||
                 line.starts_with("jit_thunks=") ||

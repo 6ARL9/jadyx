@@ -64,6 +64,8 @@ void SetArrayRewrite(bool enabled); // d3d12_texture_cache.h
 void SetSmallTextureAlignment(bool enabled); // d3d12_resource_allocator.h
 void SetSpareHeaps(bool enabled); // d3d12_resource_allocator.h
 void SetBufferHeaps(bool enabled); // d3d12_buffer_heap_pool.h
+void SetBufferHeapMaxMiB(u32 mib); // d3d12_buffer_heap_pool.h
+void SetIdleHeapSeconds(u32 seconds); // d3d12_resource_allocator.h
 void SetPsoBlobs(bool enabled); // d3d12_pso_blob_cache.h
 void SetCachedStaging(bool enabled); // d3d12_staging_buffer_pool.h
 void SetKeepLargeStaging(bool enabled); // d3d12_staging_buffer_pool.h

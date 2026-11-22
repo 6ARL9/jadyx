@@ -16,6 +16,7 @@
 #include <array>
 #include <atomic>
 #include <bit>
+#include <chrono>
 #include <condition_variable>
 #include <map>
 #include <mutex>
@@ -33,6 +34,9 @@ using namespace Common::Literals;
 namespace {
 std::atomic_bool small_texture_alignment{true};
 std::atomic_bool spare_heaps{true};
+std::atomic<u32> idle_heap_seconds{10};
+/// Empty heaps kept past the warm one per class while they wait out idle_heap_seconds.
+constexpr u64 IDLE_HEAP_BYTES = 128_MiB;
 std::atomic_bool cpu_texture_writes{false};
 std::atomic_bool cpu_texture_refused{false};
 
@@ -159,6 +163,7 @@ struct TextureResourceAllocator::State {
         std::map<u64, u64> free_ranges; // offset -> bytes
         Common::MemoryCharge charge;
         u64 empty_tick{}; // first trim pass that saw it empty; 0 while in use
+        std::chrono::steady_clock::time_point empty_since{}; // KeepWarm: first seen empty
         bool spare{};     // made ahead on the spare thread and not placed into yet
     };
 
@@ -315,6 +320,10 @@ void SetSmallTextureAlignment(bool enabled) {
 
 void SetSpareHeaps(bool enabled) {
     spare_heaps.store(enabled, std::memory_order_relaxed);
+}
+
+void SetIdleHeapSeconds(u32 seconds) {
+    idle_heap_seconds.store((std::min)(seconds, 600U), std::memory_order_relaxed);
 }
 
 void SetCpuTextureWrites(bool enabled) {
@@ -733,16 +742,37 @@ void TextureResourceAllocator::TrimEmptyHeaps(TrimMode mode) {
     // would have reused. Settled keeps a heap until it has stayed empty for this many submits.
     constexpr u64 settle_ticks = 64;
     const u64 tick = mode == TrimMode::Settled ? scheduler.CurrentTick() : 0;
+    // KeepWarm without pressure: the next burst of the same textures and render targets would
+    // make them again, so the extra empty heaps wait a while (within a byte budget).
+    const u32 idle_seconds = idle_heap_seconds.load(std::memory_order_relaxed);
+    const auto now = std::chrono::steady_clock::now();
+    u64 idle_kept = 0;
     std::scoped_lock lock{state->mutex};
     std::array<bool, heap_classes> warm{};
     for (auto& block : state->blocks) {
-        if (!block.heap || block.free_ranges.size() != 1) continue;
+        if (!block.heap || block.free_ranges.size() != 1) {
+            block.empty_since = {};
+            continue;
+        }
         const auto& [offset, size] = *block.free_ranges.begin();
-        if (offset != 0 || size != block.size) continue;
+        if (offset != 0 || size != block.size) {
+            block.empty_since = {};
+            continue;
+        }
         const size_t type = static_cast<size_t>(block.heap_class);
         if (mode == TrimMode::KeepWarm && !warm[type]) {
             warm[type] = true;
             continue;
+        }
+        if (mode == TrimMode::KeepWarm && idle_seconds != 0) {
+            if (block.empty_since == std::chrono::steady_clock::time_point{}) {
+                block.empty_since = now;
+            }
+            if (now - block.empty_since < std::chrono::seconds{idle_seconds} &&
+                idle_kept + block.size <= IDLE_HEAP_BYTES) {
+                idle_kept += block.size;
+                continue;
+            }
         }
         if (mode == TrimMode::Settled) {
             if (!block.empty_tick) block.empty_tick = tick;
@@ -756,6 +786,7 @@ void TextureResourceAllocator::TrimEmptyHeaps(TrimMode mode) {
         block.charge.Reset();
         block.size = 0;
         block.empty_tick = 0;
+        block.empty_since = {};
     }
 }
 

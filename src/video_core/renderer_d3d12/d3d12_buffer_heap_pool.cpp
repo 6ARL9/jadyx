@@ -27,11 +27,13 @@ using namespace Common::Literals;
 
 namespace {
 std::atomic_bool buffer_heaps{true};
+/// Larger buffers stay committed ("buffer_heap_max_mib=N", 1 to 16). 4 MiB in 0.4.4.10, where the
+/// 9 to 10 MiB buffers committed each session took about 95 ms each.
+std::atomic<u64> max_placed{16_MiB};
 
-/// Heaps are made at this size; buffers over MAX_PLACED stay committed (rare, and a heap they
+/// Heaps are made at this size; buffers over max_placed stay committed (rare, and a heap they
 /// share would be held by whichever of them lives longest).
 constexpr u64 HEAP_SIZE = 32_MiB;
-constexpr u64 MAX_PLACED = 4_MiB;
 constexpr u64 ALIGNMENT = D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT;
 /// With less free than this left in the heaps, the next heap is made ahead on another thread.
 constexpr u64 LOW_FREE = 16_MiB;
@@ -73,6 +75,10 @@ ComPtr<ID3D12Heap> MakeHeap(ID3D12Device* device) {
 
 void SetBufferHeaps(bool enabled) {
     buffer_heaps.store(enabled, std::memory_order_relaxed);
+}
+
+void SetBufferHeapMaxMiB(u32 mib) {
+    max_placed.store(u64{std::clamp<u32>(mib, 1, 16)} * 1_MiB, std::memory_order_relaxed);
 }
 
 struct BufferHeapPool::State {
@@ -297,7 +303,7 @@ BufferHeapPool::~BufferHeapPool() {
 
 ComPtr<ID3D12Resource> BufferHeapPool::Create(u64 size) {
     if (!buffer_heaps.load(std::memory_order_relaxed) || size == 0) return {};
-    if (size > MAX_PLACED) {
+    if (size > max_placed.load(std::memory_order_relaxed)) {
         std::scoped_lock lock{state->mutex};
         ++state->too_large;
         return {};

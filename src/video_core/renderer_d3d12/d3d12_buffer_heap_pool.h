@@ -14,6 +14,8 @@ namespace D3D12 {
 /// Guest buffers placed in pooled heaps instead of one committed resource each
 /// ("buffer_heaps=0" turns it off). Applies to buffers created from now on.
 void SetBufferHeaps(bool enabled);
+/// Buffers up to this many MiB are placed (1 to 16; 16 by default, 4 in 0.4.4.10).
+void SetBufferHeapMaxMiB(u32 mib);
 
 /// Places the buffer cache's buffers in shared DEFAULT heaps. A committed buffer is an allocation
 /// of its own from the system: Metroid Prime Remastered made 100 to 170 of them in one frame at

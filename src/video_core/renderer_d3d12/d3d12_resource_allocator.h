@@ -22,6 +22,12 @@ void SetSmallTextureAlignment(bool enabled);
 /// ("spare_heaps=0" turns it off).
 void SetSpareHeaps(bool enabled);
 
+/// Without memory pressure, empty heaps beyond the warm one per class are kept this many seconds
+/// (up to 128 MiB of them) before release ("idle_heap_seconds=N", 0 to 600; 0 releases them on
+/// the next frame as before). Metroid Prime Remastered released and remade about 190 heaps
+/// (4.8 GiB) a session, spares made on the other thread included (49 of 104 never used).
+void SetIdleHeapSeconds(u32 seconds);
+
 /// Plain sampled textures (no render target, depth or UAV use) placed in CPU-writable heaps
 /// (write-back L0) on a cache-coherent UMA device, so the CPU writes their first upload in place
 /// instead of through staging and a GPU copy ("cpu_texture_writes=1"). Off for good once the

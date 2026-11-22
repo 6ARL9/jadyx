@@ -91,6 +91,10 @@ struct BootConfig {
     /// Guest buffers placed in pooled heaps instead of one committed resource each
     /// ("buffer_heaps=0" turns it off).
     bool buffer_heaps{true};
+    /// Largest buffer placed in those heaps, in MiB ("buffer_heap_max_mib=N", 1 to 16).
+    u32 buffer_heap_max_mib{16};
+    /// Seconds an extra empty texture heap is kept without pressure ("idle_heap_seconds=N").
+    u32 idle_heap_seconds{10};
     /// 3D textures in GPU memory, not the CPU-writable heaps ("volumes_in_gpu_memory=0|1"; off).
     bool volumes_in_gpu_memory{};
     /// Streamed volume parts uploaded per frame, in MiB ("volume_upload_mib=N", 1 to 64).
