@@ -7,9 +7,18 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <chrono>
+#include <condition_variable>
 #include <cstring>
+#include <deque>
+#include <functional>
+#include <list>
+#include <memory>
 #include <mutex>
 #include <thread>
+#include <unordered_map>
+#include <utility>
+#include <vector>
 #include <windows.h>
 #include <objbase.h>
 #include <fileapifromapp.h>
@@ -18,6 +27,7 @@
 #include <winrt/Windows.Storage.Streams.h>
 #include <winrt/Windows.Storage.Search.h>
 #include <winrt/Windows.Storage.FileProperties.h>
+#include <winrt/Windows.System.h>
 #include "common/host_stalls.h"
 #include "common/logging.h"
 #include "core/file_sys/vfs/vfs_real.h"
@@ -66,6 +76,365 @@ StorageFolder ResolveFolder(const StoragePath& path, std::string_view relative) 
     return folder;
 }
 
+std::atomic<bool> rom_cache_enabled{true};
+
+/// Reads [offset, offset + length) of an open file handle at that position. The file pointer
+/// is set and read under the caller's lock, if the handle is shared.
+bool ReadAt(HANDLE handle, u8* data, size_t length, u64 offset) {
+    LARGE_INTEGER position{};
+    position.QuadPart = static_cast<LONGLONG>(offset);
+    if (!SetFilePointerEx(handle, position, nullptr, FILE_BEGIN)) {
+        return false;
+    }
+    size_t done = 0;
+    while (done < length) {
+        const DWORD count = static_cast<DWORD>(std::min<size_t>(ReadChunk, length - done));
+        DWORD read{};
+        if (!ReadFile(handle, data + done, count, &read, nullptr) || read == 0) {
+            return false;
+        }
+        done += read;
+    }
+    return true;
+}
+
+/// Games on external storage (a USB hard drive) are read through this: blocks already read
+/// come from memory, and a reader going through a file in order has the next blocks read ahead
+/// by a background thread. Metroid Prime Remastered on a USB hard drive: reads took 1 to 110 ms
+/// each, 2.4 s of the hitches over 100 ms in 39 minutes. boot.cfg rom_cache=0 turns it off.
+class RomReadCache {
+public:
+    static constexpr size_t BLOCK = 256 * 1024;
+    static constexpr size_t CAPACITY = 192ULL << 20;
+    /// While the app has less than this free, the cache keeps a quarter of its capacity.
+    static constexpr u64 LOW_FREE = 384ULL << 20;
+    static constexpr u64 PREFETCH_BLOCKS = 16; ///< 4 MiB ahead of an in-order reader
+    static constexpr size_t MAX_QUEUED = 8;
+
+    static RomReadCache& Instance() {
+        static RomReadCache cache;
+        return cache;
+    }
+
+    /// One id per file path, shared by every handle opened on it.
+    u32 FileId(const std::wstring& file_path) {
+        std::scoped_lock lock{mutex};
+        return file_ids.try_emplace(file_path, static_cast<u32>(file_ids.size())).first->second;
+    }
+
+    /// Fills data with [offset, offset + length) of the file, from memory where it can and
+    /// through read_disk (positional) for the rest. False when a disk read failed.
+    bool Read(u32 file, u64 file_size, u8* data, size_t length, u64 offset,
+              const std::function<bool(u8*, size_t, u64)>& read_disk) {
+        requests.fetch_add(1, std::memory_order_relaxed);
+        const u64 end = offset + length;
+        u64 block = offset / BLOCK;
+        const u64 last = (end - 1) / BLOCK;
+        while (block <= last) {
+            u64 run = 0;
+            {
+                std::unique_lock lock{mutex};
+                auto it = blocks.find(Key{file, block});
+                if (it != blocks.end() && !it->second.ready) {
+                    // Being read ahead: wait for it rather than seek the same disk twice.
+                    waits.fetch_add(1, std::memory_order_relaxed);
+                    cv.wait_for(lock, std::chrono::seconds{2}, [&] {
+                        it = blocks.find(Key{file, block});
+                        return it == blocks.end() || it->second.ready;
+                    });
+                    if (it != blocks.end() && !it->second.ready) {
+                        it = blocks.end(); // Still not there: read it here.
+                    }
+                }
+                if (it != blocks.end() && it->second.ready) {
+                    Block& cached = it->second;
+                    CopyOut(block, cached.bytes.get(), cached.size, data, offset, end);
+                    lru.splice(lru.begin(), lru, cached.lru);
+                    hits.fetch_add(1, std::memory_order_relaxed);
+                    if (std::exchange(cached.prefetched, false)) {
+                        prefetch_hits.fetch_add(1, std::memory_order_relaxed);
+                    }
+                    ++block;
+                    continue;
+                }
+                // The run of blocks from here that nobody has or is reading.
+                while (block + run <= last && !blocks.contains(Key{file, block + run})) {
+                    blocks.emplace(Key{file, block + run}, Block{});
+                    ++run;
+                }
+                if (run == 0) {
+                    // A block that was being read ahead and did not come: read it alone.
+                    run = 1;
+                }
+            }
+            const u64 first_byte = block * BLOCK;
+            const size_t run_bytes =
+                static_cast<size_t>(std::min<u64>(run * BLOCK, file_size - first_byte));
+            // A run inside the request is read straight into it; one sticking out of it goes
+            // through a buffer.
+            const bool direct = first_byte >= offset && first_byte + run_bytes <= end;
+            std::vector<u8> buffer(direct ? 0 : run_bytes);
+            u8* const target = direct ? data + (first_byte - offset) : buffer.data();
+            const auto disk_begin = std::chrono::steady_clock::now();
+            const bool read = read_disk(target, run_bytes, first_byte);
+            disk_reads.fetch_add(1, std::memory_order_relaxed);
+            disk_bytes.fetch_add(run_bytes, std::memory_order_relaxed);
+            disk_us.fetch_add(static_cast<u64>(
+                                  std::chrono::duration_cast<std::chrono::microseconds>(
+                                      std::chrono::steady_clock::now() - disk_begin)
+                                      .count()),
+                              std::memory_order_relaxed);
+            misses.fetch_add(run, std::memory_order_relaxed);
+            Insert(file, block, run, target, run_bytes, read, false);
+            if (!read) {
+                return false;
+            }
+            for (u64 i = 0; i < run && !direct; ++i) {
+                const size_t in_run = static_cast<size_t>(i * BLOCK);
+                CopyOut(block + i, target + in_run,
+                        static_cast<u32>(std::min<size_t>(BLOCK, run_bytes - in_run)), data,
+                        offset, end);
+            }
+            block += run;
+        }
+        MaybeLog();
+        return true;
+    }
+
+    /// Reads [first, first + count) blocks of the file ahead, on the background thread, with a
+    /// handle of its own on file_path.
+    void Prefetch(u32 file, const std::wstring& file_path, u64 file_size, u64 first,
+                  u64 count) {
+        const u64 file_blocks = (file_size + BLOCK - 1) / BLOCK;
+        if (first >= file_blocks) {
+            return;
+        }
+        count = std::min(count, file_blocks - first);
+        {
+            std::scoped_lock lock{mutex};
+            // Nothing to do when the first and last are there or on their way.
+            if (blocks.contains(Key{file, first}) &&
+                blocks.contains(Key{file, first + count - 1})) {
+                return;
+            }
+            if (queue.size() >= MAX_QUEUED) {
+                return;
+            }
+            queue.push_back({file, file_path, file_size, first, count});
+            if (!worker.joinable()) {
+                worker = std::jthread{[this](std::stop_token stop) { Work(stop); }};
+            }
+        }
+        cv.notify_all();
+    }
+
+private:
+    struct Key {
+        u32 file;
+        u64 block;
+        bool operator==(const Key&) const = default;
+    };
+    struct KeyHash {
+        size_t operator()(const Key& key) const noexcept {
+            return std::hash<u64>{}((key.block * 0x9E3779B97F4A7C15ULL) ^ key.file);
+        }
+    };
+    struct Block {
+        std::unique_ptr<u8[]> bytes;
+        u32 size{};
+        bool ready{};
+        bool prefetched{}; ///< read ahead and not asked for yet
+        std::list<Key>::iterator lru;
+    };
+    struct Request {
+        u32 file;
+        std::wstring path;
+        u64 file_size;
+        u64 first;
+        u64 count;
+    };
+
+    RomReadCache() = default;
+    ~RomReadCache() {
+        if (worker.joinable()) {
+            worker.request_stop();
+            cv.notify_all();
+            worker.join();
+        }
+    }
+
+    static void CopyOut(u64 block, const u8* bytes, u32 size, u8* data, u64 offset, u64 end) {
+        const u64 block_begin = block * BLOCK;
+        const u64 from = std::max(offset, block_begin);
+        const u64 to = std::min(end, block_begin + size);
+        if (to > from) {
+            std::memcpy(data + (from - offset), bytes + (from - block_begin),
+                        static_cast<size_t>(to - from));
+        }
+    }
+
+    /// Fills the placeholders of [block, block + run) from buffer, or drops them if the read
+    /// failed, and wakes whoever waits for them.
+    void Insert(u32 file, u64 block, u64 run, const u8* bytes, size_t bytes_size, bool read,
+                bool prefetched) {
+        {
+            std::scoped_lock lock{mutex};
+            for (u64 i = 0; i < run; ++i) {
+                const auto it = blocks.find(Key{file, block + i});
+                if (it == blocks.end() || it->second.ready) {
+                    continue;
+                }
+                if (!read) {
+                    blocks.erase(it);
+                    continue;
+                }
+                const size_t in_run = static_cast<size_t>(i * BLOCK);
+                const u32 block_size =
+                    static_cast<u32>(std::min<size_t>(BLOCK, bytes_size - in_run));
+                Block& entry = it->second;
+                entry.bytes = std::make_unique<u8[]>(block_size);
+                std::memcpy(entry.bytes.get(), bytes + in_run, block_size);
+                entry.size = block_size;
+                entry.ready = true;
+                entry.prefetched = prefetched;
+                lru.push_front(Key{file, block + i});
+                entry.lru = lru.begin();
+                cached_bytes += block_size;
+            }
+            Evict();
+        }
+        cv.notify_all();
+    }
+
+    /// Drops the least recently used blocks over the capacity, a quarter of it while the app
+    /// is short of memory. Under the lock.
+    void Evict() {
+        const auto now = std::chrono::steady_clock::now();
+        if (now - memory_checked > std::chrono::seconds{2}) {
+            memory_checked = now;
+            try {
+                EnsureStorageApartment();
+                const u64 limit = winrt::Windows::System::MemoryManager::AppMemoryUsageLimit();
+                const u64 usage = winrt::Windows::System::MemoryManager::AppMemoryUsage();
+                short_of_memory = limit != 0 && (usage >= limit || limit - usage < LOW_FREE);
+            } catch (...) {
+                short_of_memory = false;
+            }
+        }
+        const size_t capacity = short_of_memory ? CAPACITY / 4 : CAPACITY;
+        while (cached_bytes > capacity && !lru.empty()) {
+            const auto it = blocks.find(lru.back());
+            lru.pop_back();
+            if (it != blocks.end()) {
+                cached_bytes -= it->second.size;
+                blocks.erase(it);
+            }
+        }
+    }
+
+    void Work(std::stop_token stop) {
+        SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+        std::unordered_map<std::wstring, HANDLE> handles;
+        while (!stop.stop_requested()) {
+            Request request;
+            {
+                std::unique_lock lock{mutex};
+                cv.wait(lock, [&] { return stop.stop_requested() || !queue.empty(); });
+                if (stop.stop_requested()) {
+                    break;
+                }
+                request = std::move(queue.front());
+                queue.pop_front();
+            }
+            HANDLE& file_handle = handles[request.path];
+            if (!file_handle) {
+                file_handle = CreateFile2FromAppW(request.path.c_str(), GENERIC_READ,
+                                                  FILE_SHARE_READ, OPEN_EXISTING, nullptr);
+            }
+            if (file_handle == INVALID_HANDLE_VALUE) {
+                continue;
+            }
+            u64 block = request.first;
+            const u64 stop_block = request.first + request.count;
+            while (block < stop_block && !stop.stop_requested()) {
+                u64 run = 0;
+                {
+                    std::scoped_lock lock{mutex};
+                    while (block < stop_block && blocks.contains(Key{request.file, block})) {
+                        ++block;
+                    }
+                    while (block + run < stop_block &&
+                           !blocks.contains(Key{request.file, block + run})) {
+                        blocks.emplace(Key{request.file, block + run}, Block{});
+                        ++run;
+                    }
+                }
+                if (run == 0) {
+                    break;
+                }
+                const u64 first_byte = block * BLOCK;
+                const size_t run_bytes = static_cast<size_t>(
+                    std::min<u64>(run * BLOCK, request.file_size - first_byte));
+                std::vector<u8> buffer(run_bytes);
+                const bool read = ReadAt(file_handle, buffer.data(), run_bytes, first_byte);
+                prefetched_blocks.fetch_add(read ? run : 0, std::memory_order_relaxed);
+                Insert(request.file, block, run, buffer.data(), run_bytes, read, true);
+                block += run;
+            }
+        }
+        for (const auto& entry : handles) {
+            if (entry.second && entry.second != INVALID_HANDLE_VALUE) {
+                CloseHandle(entry.second);
+            }
+        }
+    }
+
+    void MaybeLog() {
+        const u64 now_ms = static_cast<u64>(std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count());
+        u64 logged_ms = last_log_ms.load(std::memory_order_relaxed);
+        if (now_ms - logged_ms < 30'000 ||
+            !last_log_ms.compare_exchange_strong(logged_ms, now_ms, std::memory_order_relaxed)) {
+            return;
+        }
+        const u64 reads = disk_reads.load(std::memory_order_relaxed);
+        size_t held{};
+        bool short_now{};
+        {
+            std::scoped_lock lock{mutex};
+            held = cached_bytes;
+            short_now = short_of_memory;
+        }
+        LOG_INFO(Frontend,
+                 "ROM cache: {} reads; blocks {} from memory ({} read ahead), {} from disk; "
+                 "{} disk reads, {} MiB, {:.1f} ms each; {} blocks read ahead, {} waits for "
+                 "one; {} MiB held{}",
+                 requests.load(std::memory_order_relaxed), hits.load(std::memory_order_relaxed),
+                 prefetch_hits.load(std::memory_order_relaxed),
+                 misses.load(std::memory_order_relaxed), reads,
+                 disk_bytes.load(std::memory_order_relaxed) >> 20,
+                 reads ? static_cast<double>(disk_us.load(std::memory_order_relaxed)) / 1000.0 /
+                             static_cast<double>(reads)
+                       : 0.0,
+                 prefetched_blocks.load(std::memory_order_relaxed),
+                 waits.load(std::memory_order_relaxed), held >> 20,
+                 short_now ? " (short of memory)" : "");
+    }
+
+    std::mutex mutex;
+    std::condition_variable cv;
+    std::unordered_map<Key, Block, KeyHash> blocks;
+    std::list<Key> lru;
+    size_t cached_bytes{};
+    std::unordered_map<std::wstring, u32> file_ids;
+    std::deque<Request> queue;
+    std::chrono::steady_clock::time_point memory_checked{};
+    bool short_of_memory{};
+    std::atomic<u64> requests{}, hits{}, misses{}, prefetch_hits{}, prefetched_blocks{},
+        disk_reads{}, disk_bytes{}, disk_us{}, waits{}, last_log_ms{};
+    std::jthread worker; ///< last: stopped before the rest goes
+};
+
 class StorageDirectory;
 FileSys::VirtualDir MakeDirectory(StorageFolder folder, std::string path);
 
@@ -82,6 +451,8 @@ public:
                 LOG_INFO(Frontend, "ROM storage: direct open failed error={}, trying WinRT: {}",
                          GetLastError(), this->path);
             } else {
+                wide_path = std::wstring{item.Path()};
+                cache_id = RomReadCache::Instance().FileId(wide_path);
                 LARGE_INTEGER bytes{};
                 if (!GetFileSizeEx(handle, &bytes) || bytes.QuadPart < 0) {
                     CloseHandle(handle);
@@ -114,6 +485,31 @@ public:
         if (offset >= size || !length || !data) return 0;
         length = std::min(length, size - offset);
         const Common::HostStalls::FileReadTimer read_timer;
+        if (handle != INVALID_HANDLE_VALUE && rom_cache_enabled.load(std::memory_order_relaxed)) {
+            RomReadCache& cache = RomReadCache::Instance();
+            const bool read = cache.Read(cache_id, size, data, length, offset,
+                                         [this](u8* bytes, size_t count, u64 at) {
+                                             // Serialize seek+read on this handle.
+                                             std::scoped_lock lock{mutex};
+                                             return ReadAt(handle, bytes, count, at);
+                                         });
+            if (!read) {
+                LogReadFailure(GetLastError());
+                read_timer.Done(0);
+                return 0;
+            }
+            // In order with the previous read of this file: read the next blocks ahead.
+            const u64 previous_end =
+                last_end.exchange(offset + length, std::memory_order_relaxed);
+            if (offset + RomReadCache::BLOCK >= previous_end &&
+                offset <= previous_end + RomReadCache::BLOCK) {
+                cache.Prefetch(cache_id, wide_path, size,
+                               (offset + length + RomReadCache::BLOCK - 1) / RomReadCache::BLOCK,
+                               RomReadCache::PREFETCH_BLOCKS);
+            }
+            read_timer.Done(length);
+            return length;
+        }
         std::scoped_lock lock{mutex}; // Serialize seek+read on this file, not the whole VFS.
         size_t done = 0;
         try {
@@ -169,6 +565,9 @@ private:
     StorageFile item;
     FileSys::VirtualDir parent;
     std::string path, name;
+    std::wstring wide_path; ///< for the read cache's own handle
+    u32 cache_id{};
+    mutable std::atomic<u64> last_end{~0ULL}; ///< end of the previous read, to spot in-order ones
     HANDLE handle{INVALID_HANDLE_VALUE};
     IRandomAccessStreamWithContentType stream{nullptr};
     size_t size{};
@@ -349,6 +748,10 @@ void ScanFolder(StorageFolder folder, const std::string& token, const std::wstri
     }
 }
 } // namespace
+
+void SetRomReadCache(bool enabled) {
+    rom_cache_enabled.store(enabled, std::memory_order_relaxed);
+}
 
 bool ConsumeStorageReadFailure() { return storage_read_failure.exchange(false); }
 std::uint64_t StorageFileStamp(std::string_view path) {

@@ -432,6 +432,12 @@ void ParseBootConfigFile(const std::string& install_path, BootConfig& config) {
                 WriteDiag(std::string{"boot.cfg: D3D12 BC array alias "} + line.back());
                 continue;
             }
+            if (line == "rom_cache=0" || line == "rom_cache=1") {
+                config.rom_cache = line.back() == '1';
+                WriteDiag(std::string{"boot.cfg: ROM read cache "} +
+                          (config.rom_cache ? "on" : "off"));
+                continue;
+            }
             if (line == "bc_volume_stream=0" || line == "bc_volume_stream=1") {
                 config.bc_volume_stream = line.back() == '1';
                 WriteDiag(std::string{"boot.cfg: D3D12 BC volume streaming "} +

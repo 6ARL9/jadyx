@@ -26,6 +26,9 @@ std::vector<StorageBrowserEntry> BrowseStorageFolder(std::string_view path, std:
                                                      const std::function<bool(std::string_view)>& keep);
 std::uint64_t StorageFileStamp(std::string_view path);
 bool ConsumeStorageReadFailure();
+/// Whether games on external storage are read through a block cache with read-ahead
+/// (boot.cfg "rom_cache=0|1"; on by default).
+void SetRomReadCache(bool enabled);
 // Bounded preflight, run on an MTA worker before starting the guest. Reports
 // access/removal errors in the library instead of closing the application.
 std::string CheckExternalGame(std::string_view path);
