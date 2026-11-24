@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include <algorithm>
+#include <chrono>
 
 #include <fmt/format.h>
 
@@ -22,7 +23,7 @@ constexpr u64 SIZE_GRANULARITY = D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT;
 } // Anonymous namespace
 
 TransferBufferPool::TransferBufferPool(const Device& device_, Scheduler& scheduler_)
-    : device{device_}, scheduler{scheduler_} {}
+    : device{device_}, scheduler{scheduler_}, heaps{device_, BufferHeapUse::TransferBuffers} {}
 
 TransferBufferPool::~TransferBufferPool() = default;
 
@@ -68,6 +69,17 @@ ComPtr<ID3D12Resource> TransferBufferPool::Acquire(u64 size, bool unordered_acce
         if (stats) {
             ++stats->misses;
             stats->miss_bytes += size;
+        }
+    }
+    {
+        // A range of a heap made ahead: committing one waited on the system now and then (528 ms
+        // for 64 KiB mid-game). Placed buffers allow unordered access: both kinds fit.
+        const auto create_begin = std::chrono::steady_clock::now();
+        if (ComPtr<ID3D12Resource> placed = heaps.Create(size)) {
+            VideoCore::Perf::Add(VideoCore::Perf::Counter::ResourceCreateUs,
+                                 VideoCore::Perf::ElapsedUs(create_begin));
+            VideoCore::Perf::Add(VideoCore::Perf::Counter::ResourcesCreated, 1);
+            return placed;
         }
     }
     HRESULT hr = S_OK;
@@ -147,6 +159,7 @@ void TransferBufferPool::Release(ComPtr<ID3D12Resource>&& buffer) {
 
 void TransferBufferPool::Trim(bool under_pressure) {
     TrimOlderThan(under_pressure ? 0 : IDLE_TICKS);
+    heaps.TickFrame();
 }
 
 void TransferBufferPool::TrimStale(bool emergency) {

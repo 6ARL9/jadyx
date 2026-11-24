@@ -60,6 +60,9 @@ void ParseBootConfigFile(const std::string& install_path, BootConfig& config) {
             } else if (line == "buffer_heaps=1" || line == "buffer_heaps=0") {
                 config.buffer_heaps = line == "buffer_heaps=1";
                 WriteDiag("boot.cfg: " + line);
+            } else if (line == "transfer_heaps=1" || line == "transfer_heaps=0") {
+                config.transfer_heaps = line == "transfer_heaps=1";
+                WriteDiag("boot.cfg: " + line);
             } else if (line.starts_with("buffer_heap_max_mib=")) {
                 const auto value = line.substr(20);
                 unsigned long parsed{};
@@ -474,6 +477,12 @@ void ParseBootConfigFile(const std::string& install_path, BootConfig& config) {
                 WriteDiag(std::string{"boot.cfg: D3D12 BC array alias "} + line.back());
                 continue;
             }
+            if (line == "rom_learn=0" || line == "rom_learn=1") {
+                config.rom_learn = line.back() == '1';
+                WriteDiag(std::string{"boot.cfg: ROM learned read-ahead "} +
+                          (config.rom_learn ? "on" : "off"));
+                continue;
+            }
             if (line == "rom_readahead=0" || line == "rom_readahead=1") {
                 config.rom_readahead = line.back() == '1';
                 WriteDiag(std::string{"boot.cfg: ROM read-ahead "} +
@@ -672,6 +681,7 @@ void ParseBootConfigFile(const std::string& install_path, BootConfig& config) {
                 line.starts_with("oom_reserve_mib=") ||
                 line.starts_with("spare_heaps=") ||
                 line.starts_with("buffer_heaps=") ||
+                line.starts_with("transfer_heaps=") ||
                 line.starts_with("buffer_heap_max_mib=") ||
                 line.starts_with("idle_heap_seconds=") ||
                 line.starts_with("volumes_in_gpu_memory=") ||

@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "jadyx/storage/uwp_rom_storage.h"
 #include "jadyx/storage/storage_path.h"
+#include "jadyx/storage/rom_read_learner.h"
 #include "jadyx/i18n/localization.h"
 
 #include <algorithm>
@@ -10,10 +11,13 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstring>
+#include <cwchar>
 #include <deque>
 #include <functional>
 #include <list>
 #include <memory>
+#include <span>
+#include <string>
 #include <mutex>
 #include <thread>
 #include <unordered_map>
@@ -85,6 +89,64 @@ std::atomic<bool> rom_cache_enabled{false};
 /// in 23 minutes of Metroid Prime Remastered, 18% of it used, and the game's own reads waited
 /// behind it (file read hitches 62 -> 158 ms a minute).
 std::atomic<bool> rom_readahead_enabled{false};
+/// Learned read-ahead (RomReadLearner): blocks the game read next the last time it was at the
+/// same block are read ahead, at low I/O priority; the game's other reads go to the disk as
+/// before. On by default; boot.cfg rom_learn=0 turns it off.
+std::atomic<bool> rom_learn_enabled{true};
+
+std::vector<u8> ReadWholeFile(const std::wstring& file_path, u64 max_bytes) {
+    std::vector<u8> bytes;
+    const HANDLE file = CreateFile2FromAppW(file_path.c_str(), GENERIC_READ, FILE_SHARE_READ,
+                                            OPEN_EXISTING, nullptr);
+    if (file == INVALID_HANDLE_VALUE) {
+        return bytes;
+    }
+    LARGE_INTEGER file_size{};
+    if (GetFileSizeEx(file, &file_size) && file_size.QuadPart > 0 &&
+        static_cast<u64>(file_size.QuadPart) <= max_bytes) {
+        bytes.resize(static_cast<size_t>(file_size.QuadPart));
+        size_t done = 0;
+        while (done < bytes.size()) {
+            DWORD read{};
+            const auto count = static_cast<DWORD>(std::min<size_t>(bytes.size() - done, ReadChunk));
+            if (!ReadFile(file, bytes.data() + done, count, &read, nullptr) || read == 0) {
+                bytes.clear();
+                break;
+            }
+            done += read;
+        }
+    }
+    CloseHandle(file);
+    return bytes;
+}
+
+/// Writes through a temporary file, so a crash mid-write leaves the previous one.
+bool WriteWholeFile(const std::wstring& file_path, std::span<const u8> bytes) {
+    const std::wstring temporary = file_path + L".tmp";
+    const HANDLE file = CreateFile2FromAppW(temporary.c_str(), GENERIC_WRITE, 0, CREATE_ALWAYS,
+                                            nullptr);
+    if (file == INVALID_HANDLE_VALUE) {
+        return false;
+    }
+    size_t done = 0;
+    bool written = true;
+    while (done < bytes.size()) {
+        DWORD wrote{};
+        const auto count = static_cast<DWORD>(std::min<size_t>(bytes.size() - done, ReadChunk));
+        if (!WriteFile(file, bytes.data() + done, count, &wrote, nullptr) || wrote == 0) {
+            written = false;
+            break;
+        }
+        done += wrote;
+    }
+    CloseHandle(file);
+    if (!written) {
+        DeleteFileFromAppW(temporary.c_str());
+        return false;
+    }
+    DeleteFileFromAppW(file_path.c_str());
+    return MoveFileFromAppW(temporary.c_str(), file_path.c_str()) != FALSE;
+}
 
 /// Reads [offset, offset + length) of an open file handle at that position. The file pointer
 /// is set and read under the caller's lock, if the handle is shared.
@@ -121,6 +183,17 @@ public:
     static constexpr size_t MAX_QUEUED = 8;
     /// Evicted blocks kept for the next ones: fresh 256 KiB allocations fault their pages in.
     static constexpr size_t MAX_SPARE = 32;
+    /// With only the learned read-ahead on, the cache holds just what was read ahead.
+    static constexpr size_t LEARN_CAPACITY = 96ULL << 20;
+    static constexpr size_t MAX_QUEUED_LEARN = 160;
+    /// Read ahead only after the game's own disk reads left the disk alone this long: a hard
+    /// drive serving both seeks back and forth between them.
+    static constexpr u64 IDLE_US = 20'000;
+    /// Blocks read ahead in one disk read: the game waits for a block being read ahead, and a
+    /// short read keeps that wait short.
+    static constexpr u64 MAX_RUN = 4;
+    /// Journals are saved this often while they grow (and when the worker stops).
+    static constexpr auto SAVE_EVERY = std::chrono::seconds{60};
 
     static RomReadCache& Instance() {
         static RomReadCache cache;
@@ -235,14 +308,250 @@ public:
                 return;
             }
             queue.push_back({file, file_path, file_size, first, count});
-            if (!worker.joinable()) {
-                worker = std::jthread{[this](std::stop_token stop) { Work(stop); }};
+            StartWorker();
+        }
+        cv.notify_all();
+    }
+
+    /// Loads the learned journal of a file (by name and size, from LocalState/rom-learn), once
+    /// per file. False when it cannot be kept.
+    bool AttachLearner(u32 file, const std::wstring& file_path, u64 file_size,
+                       const std::string& file_name) {
+        {
+            std::scoped_lock lock{learn_mutex};
+            if (learners.contains(file)) {
+                return true;
             }
+        }
+        std::wstring journal_path;
+        try {
+            EnsureStorageApartment();
+            const std::wstring folder =
+                std::wstring{ApplicationData::Current().LocalFolder().Path()} + L"\\rom-learn";
+            CreateDirectoryFromAppW(folder.c_str(), nullptr);
+            // FNV-1a over the name and size: the same game file found again on any drive.
+            u64 key = 0xcbf29ce484222325ULL;
+            const auto mix = [&key](u8 byte) { key = (key ^ byte) * 0x100000001b3ULL; };
+            for (const char c : file_name) {
+                mix(static_cast<u8>(c));
+            }
+            for (int shift = 0; shift < 64; shift += 8) {
+                mix(static_cast<u8>(file_size >> shift));
+            }
+            wchar_t name[32]{};
+            swprintf_s(name, std::size(name), L"\\%016llx.jrl",
+                       static_cast<unsigned long long>(key));
+            journal_path = folder + name;
+        } catch (...) {
+            return false;
+        }
+        auto learned = std::make_unique<Learned>();
+        learned->path = file_path;
+        learned->journal_path = journal_path;
+        learned->file_size = file_size;
+        learned->start = std::chrono::steady_clock::now();
+        learned->saved_at = learned->start;
+        const std::vector<u8> saved = ReadWholeFile(journal_path, 64ULL << 20);
+        const bool loaded = learned->learner.Load(saved);
+        LOG_INFO(Frontend, "ROM learn: {} journal for {} ({} entries)",
+                 loaded ? "loaded the" : "no usable", file_name,
+                 learned->learner.LoadedEntries());
+        {
+            std::scoped_lock lock{learn_mutex};
+            learners.try_emplace(file, std::move(learned));
+        }
+        learners_attached.store(true, std::memory_order_relaxed);
+        std::scoped_lock lock{mutex};
+        StartWorker();
+        return true;
+    }
+
+    /// Like Read, without caching what the game reads itself: blocks read ahead come from
+    /// memory (waiting for one being read), the rest straight from the disk as asked.
+    bool ReadLearned(u32 file, u64 file_size, u8* data, size_t length, u64 offset,
+                     const std::function<bool(u8*, size_t, u64)>& read_disk) {
+        requests.fetch_add(1, std::memory_order_relaxed);
+        const u64 end = offset + length;
+        const u64 last = (end - 1) / BLOCK;
+        u64 pending_from = 0;
+        bool pending = false;
+        // Reads [pending_from, to) of the request from the disk.
+        const auto flush = [&](u64 to) {
+            if (!pending) {
+                return true;
+            }
+            pending = false;
+            if (to <= pending_from) {
+                return true;
+            }
+            const auto disk_begin = std::chrono::steady_clock::now();
+            demand_reads_active.fetch_add(1, std::memory_order_relaxed);
+            const bool read = read_disk(data + (pending_from - offset),
+                                        static_cast<size_t>(to - pending_from), pending_from);
+            demand_reads_active.fetch_sub(1, std::memory_order_relaxed);
+            last_demand_us.store(NowUs(), std::memory_order_relaxed);
+            disk_reads.fetch_add(1, std::memory_order_relaxed);
+            disk_bytes.fetch_add(to - pending_from, std::memory_order_relaxed);
+            disk_us.fetch_add(static_cast<u64>(
+                                  std::chrono::duration_cast<std::chrono::microseconds>(
+                                      std::chrono::steady_clock::now() - disk_begin)
+                                      .count()),
+                              std::memory_order_relaxed);
+            return read;
+        };
+        for (u64 block = offset / BLOCK; block <= last; ++block) {
+            bool served = false;
+            {
+                std::unique_lock lock{mutex};
+                auto it = blocks.find(Key{file, block});
+                if (it != blocks.end() && !it->second.ready) {
+                    // Being read ahead right now: a short wait beats a second seek.
+                    waits.fetch_add(1, std::memory_order_relaxed);
+                    cv.wait_for(lock, std::chrono::seconds{1}, [&] {
+                        it = blocks.find(Key{file, block});
+                        return it == blocks.end() || it->second.ready;
+                    });
+                }
+                if (it != blocks.end() && it->second.ready) {
+                    Block& cached = it->second;
+                    if (cached.size == std::min<u64>(BLOCK, file_size - block * BLOCK)) {
+                        CopyOut(block, cached.bytes.get(), cached.size, data, offset, end);
+                        lru.splice(lru.begin(), lru, cached.lru);
+                        hits.fetch_add(1, std::memory_order_relaxed);
+                        if (std::exchange(cached.prefetched, false)) {
+                            prefetch_hits.fetch_add(1, std::memory_order_relaxed);
+                        }
+                        served = true;
+                    }
+                }
+            }
+            if (served) {
+                if (!flush(std::max(offset, block * BLOCK))) {
+                    return false;
+                }
+                continue;
+            }
+            misses.fetch_add(1, std::memory_order_relaxed);
+            if (!pending) {
+                pending = true;
+                pending_from = std::max(offset, block * BLOCK);
+            }
+        }
+        if (!flush(end)) {
+            return false;
+        }
+        MaybeLog();
+        return true;
+    }
+
+    /// Records a read in the file's journal and queues what the game read next last time.
+    void Learn(u32 file, u64 offset, size_t length) {
+        std::vector<u32> ahead;
+        std::wstring file_path;
+        u64 file_size{};
+        {
+            std::scoped_lock lock{learn_mutex};
+            const auto found = learners.find(file);
+            if (found == learners.end()) {
+                return;
+            }
+            Learned& learned = *found->second;
+            const auto now_ms = static_cast<u32>(
+                std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now() - learned.start)
+                    .count());
+            ahead = learned.learner.OnRead(static_cast<u32>(offset / BLOCK),
+                                           static_cast<u32>((offset + length - 1) / BLOCK),
+                                           now_ms);
+            if (ahead.empty()) {
+                return;
+            }
+            file_path = learned.path;
+            file_size = learned.file_size;
+        }
+        predicted_blocks.fetch_add(ahead.size(), std::memory_order_relaxed);
+        {
+            std::scoped_lock lock{mutex};
+            // Runs of consecutive blocks, in the order the game read them.
+            for (size_t at = 0; at < ahead.size();) {
+                size_t next = at + 1;
+                while (next < ahead.size() && ahead[next] == ahead[next - 1] + 1 &&
+                       next - at < MAX_RUN) {
+                    ++next;
+                }
+                if (queue.size() >= MAX_QUEUED_LEARN) {
+                    dropped_blocks.fetch_add(ahead.size() - at, std::memory_order_relaxed);
+                    break;
+                }
+                if (!blocks.contains(Key{file, ahead[at]})) {
+                    queue.push_back({file, file_path, file_size, ahead[at], next - at});
+                }
+                at = next;
+            }
+            StartWorker();
         }
         cv.notify_all();
     }
 
 private:
+    struct Learned {
+        RomReadLearner learner;
+        std::wstring path;
+        std::wstring journal_path;
+        u64 file_size{};
+        std::chrono::steady_clock::time_point start;
+        std::chrono::steady_clock::time_point saved_at;
+    };
+
+    static u64 NowUs() {
+        return static_cast<u64>(std::chrono::duration_cast<std::chrono::microseconds>(
+                                    std::chrono::steady_clock::now().time_since_epoch())
+                                    .count());
+    }
+
+    /// Waits until the game's own disk reads left the disk alone for IDLE_US. False to stop.
+    bool WaitForIdleDisk(std::stop_token stop) {
+        while (!stop.stop_requested()) {
+            const u64 since = NowUs() - last_demand_us.load(std::memory_order_relaxed);
+            if (demand_reads_active.load(std::memory_order_relaxed) == 0 && since >= IDLE_US) {
+                return true;
+            }
+            idle_waits.fetch_add(1, std::memory_order_relaxed);
+            std::this_thread::sleep_for(std::chrono::milliseconds{5});
+        }
+        return false;
+    }
+
+    /// Under the lock.
+    void StartWorker() {
+        if (!worker.joinable()) {
+            worker = std::jthread{[this](std::stop_token stop) { Work(stop); }};
+        }
+    }
+
+    /// Saves the journals that grew, every SAVE_EVERY (all of them when forced).
+    void SaveJournals(bool force) {
+        const auto now = std::chrono::steady_clock::now();
+        std::vector<std::pair<std::wstring, std::vector<u8>>> writes;
+        {
+            std::scoped_lock lock{learn_mutex};
+            for (auto& entry : learners) {
+                Learned& learned = *entry.second;
+                if (!learned.learner.Dirty() || (!force && now - learned.saved_at < SAVE_EVERY)) {
+                    continue;
+                }
+                writes.emplace_back(learned.journal_path, learned.learner.Serialize());
+                learned.learner.MarkSaved();
+                learned.saved_at = now;
+            }
+        }
+        for (const auto& [journal_path, bytes] : writes) {
+            if (!WriteWholeFile(journal_path, bytes)) {
+                save_failures.fetch_add(1, std::memory_order_relaxed);
+            }
+        }
+    }
+
     struct Key {
         u32 file;
         u64 block;
@@ -340,12 +649,17 @@ private:
                 short_of_memory = false;
             }
         }
-        const size_t capacity = short_of_memory ? CAPACITY / 4 : CAPACITY;
+        const size_t full = rom_cache_enabled.load(std::memory_order_relaxed) ? CAPACITY
+                                                                               : LEARN_CAPACITY;
+        const size_t capacity = short_of_memory ? full / 4 : full;
         while (cached_bytes > capacity && !lru.empty()) {
             const auto it = blocks.find(lru.back());
             lru.pop_back();
             if (it != blocks.end()) {
                 cached_bytes -= it->second.size;
+                if (it->second.prefetched) {
+                    unused_evicted.fetch_add(1, std::memory_order_relaxed);
+                }
                 if (it->second.size == BLOCK && spare.size() < MAX_SPARE) {
                     spare.push_back(std::move(it->second.bytes));
                 }
@@ -362,9 +676,16 @@ private:
             Request request;
             {
                 std::unique_lock lock{mutex};
-                cv.wait(lock, [&] { return stop.stop_requested() || !queue.empty(); });
+                const bool woken = cv.wait_for(lock, std::chrono::seconds{5}, [&] {
+                    return stop.stop_requested() || !queue.empty();
+                });
                 if (stop.stop_requested()) {
                     break;
+                }
+                if (!woken) {
+                    lock.unlock();
+                    SaveJournals(false);
+                    continue;
                 }
                 request = std::move(queue.front());
                 queue.pop_front();
@@ -373,6 +694,13 @@ private:
             if (!file_handle) {
                 file_handle = CreateFile2FromAppW(request.path.c_str(), GENERIC_READ,
                                                   FILE_SHARE_READ, OPEN_EXISTING, nullptr);
+                if (file_handle != INVALID_HANDLE_VALUE) {
+                    // Behind the game's own reads on the same disk.
+                    FILE_IO_PRIORITY_HINT_INFO hint{};
+                    hint.PriorityHint = IoPriorityHintLow;
+                    SetFileInformationByHandle(file_handle, FileIoPriorityHintInfo, &hint,
+                                               sizeof(hint));
+                }
             }
             if (file_handle == INVALID_HANDLE_VALUE) {
                 continue;
@@ -380,13 +708,17 @@ private:
             u64 block = request.first;
             const u64 stop_block = request.first + request.count;
             while (block < stop_block && !stop.stop_requested()) {
+                // Before claiming the blocks: the game must not wait on a read that waits for it.
+                if (learners_attached.load(std::memory_order_relaxed) && !WaitForIdleDisk(stop)) {
+                    break;
+                }
                 u64 run = 0;
                 {
                     std::scoped_lock lock{mutex};
                     while (block < stop_block && blocks.contains(Key{request.file, block})) {
                         ++block;
                     }
-                    while (block + run < stop_block &&
+                    while (block + run < stop_block && run < MAX_RUN &&
                            !blocks.contains(Key{request.file, block + run})) {
                         blocks.emplace(Key{request.file, block + run}, Block{});
                         ++run;
@@ -413,6 +745,7 @@ private:
                 CloseHandle(entry.second);
             }
         }
+        SaveJournals(true);
     }
 
     void MaybeLog() {
@@ -430,6 +763,38 @@ private:
             std::scoped_lock lock{mutex};
             held = cached_bytes;
             short_now = short_of_memory;
+        }
+        size_t journal_loaded{}, journal_new{};
+        u64 matched{};
+        {
+            std::scoped_lock lock{learn_mutex};
+            for (const auto& entry : learners) {
+                journal_loaded += entry.second->learner.LoadedEntries();
+                journal_new += entry.second->learner.SessionEntries();
+                matched += entry.second->learner.MatchedReads();
+            }
+        }
+        if (!rom_cache_enabled.load(std::memory_order_relaxed)) {
+            LOG_INFO(Frontend,
+                     "ROM learn: {} reads; blocks {} read ahead and used, {} from disk ({} disk "
+                     "reads, {} MiB, {:.1f} ms each), {} waits for one being read; {} blocks "
+                     "predicted, {} read ahead, {} dropped unused, {} not queued; journal {} "
+                     "loaded + {} this run, {} reads matched; {} MiB held{}{}",
+                     requests.load(std::memory_order_relaxed),
+                     prefetch_hits.load(std::memory_order_relaxed),
+                     misses.load(std::memory_order_relaxed), reads,
+                     disk_bytes.load(std::memory_order_relaxed) >> 20,
+                     reads ? static_cast<double>(disk_us.load(std::memory_order_relaxed)) /
+                                 1000.0 / static_cast<double>(reads)
+                           : 0.0,
+                     waits.load(std::memory_order_relaxed),
+                     predicted_blocks.load(std::memory_order_relaxed),
+                     prefetched_blocks.load(std::memory_order_relaxed),
+                     unused_evicted.load(std::memory_order_relaxed),
+                     dropped_blocks.load(std::memory_order_relaxed), journal_loaded, journal_new,
+                     matched, held >> 20, short_now ? " (short of memory)" : "",
+                     save_failures.load(std::memory_order_relaxed) ? " (journal not saved)" : "");
+            return;
         }
         LOG_INFO(Frontend,
                  "ROM cache: {} reads; blocks {} from memory ({} read ahead), {} from disk; "
@@ -458,7 +823,12 @@ private:
     std::chrono::steady_clock::time_point memory_checked{};
     bool short_of_memory{};
     std::atomic<u64> requests{}, hits{}, misses{}, prefetch_hits{}, prefetched_blocks{},
-        disk_reads{}, disk_bytes{}, disk_us{}, waits{}, last_log_ms{};
+        disk_reads{}, disk_bytes{}, disk_us{}, waits{}, last_log_ms{}, predicted_blocks{},
+        unused_evicted{}, dropped_blocks{}, save_failures{}, idle_waits{}, last_demand_us{};
+    std::atomic<int> demand_reads_active{};
+    std::atomic<bool> learners_attached{};
+    std::mutex learn_mutex; ///< guards learners; never held together with mutex
+    std::unordered_map<u32, std::unique_ptr<Learned>> learners;
     std::jthread worker; ///< last: stopped before the rest goes
 };
 
@@ -484,7 +854,14 @@ public:
                 if (!GetFileSizeEx(handle, &bytes) || bytes.QuadPart < 0) {
                     CloseHandle(handle);
                     handle = INVALID_HANDLE_VALUE;
-                } else size = static_cast<size_t>(bytes.QuadPart);
+                } else {
+                    size = static_cast<size_t>(bytes.QuadPart);
+                    // Large game files only: small ones are read once.
+                    learning = rom_learn_enabled.load(std::memory_order_relaxed) &&
+                               size >= (64ULL << 20) &&
+                               RomReadCache::Instance().AttachLearner(cache_id, wide_path, size,
+                                                                      name);
+                }
             }
         }
         if (handle == INVALID_HANDLE_VALUE) {
@@ -535,6 +912,25 @@ public:
                                (offset + length + RomReadCache::BLOCK - 1) / RomReadCache::BLOCK,
                                RomReadCache::PREFETCH_BLOCKS);
             }
+            if (learning) {
+                cache.Learn(cache_id, offset, length);
+            }
+            read_timer.Done(length);
+            return length;
+        }
+        if (learning) {
+            RomReadCache& cache = RomReadCache::Instance();
+            const bool read = cache.ReadLearned(cache_id, size, data, length, offset,
+                                                [this](u8* bytes, size_t count, u64 at) {
+                                                    std::scoped_lock lock{mutex};
+                                                    return ReadAt(handle, bytes, count, at);
+                                                });
+            if (!read) {
+                LogReadFailure(GetLastError());
+                read_timer.Done(0);
+                return 0;
+            }
+            cache.Learn(cache_id, offset, length);
             read_timer.Done(length);
             return length;
         }
@@ -595,6 +991,7 @@ private:
     std::string path, name;
     std::wstring wide_path; ///< for the read cache's own handle
     u32 cache_id{};
+    bool learning{}; ///< reads go through the learned read-ahead (rom_learn)
     mutable std::atomic<u64> last_end{~0ULL}; ///< end of the previous read, to spot in-order ones
     HANDLE handle{INVALID_HANDLE_VALUE};
     IRandomAccessStreamWithContentType stream{nullptr};
@@ -783,6 +1180,10 @@ void SetRomReadCache(bool enabled) {
 
 void SetRomReadAhead(bool enabled) {
     rom_readahead_enabled.store(enabled, std::memory_order_relaxed);
+}
+
+void SetRomLearn(bool enabled) {
+    rom_learn_enabled.store(enabled, std::memory_order_relaxed);
 }
 
 bool ConsumeStorageReadFailure() { return storage_read_failure.exchange(false); }

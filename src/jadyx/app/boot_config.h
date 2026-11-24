@@ -93,6 +93,8 @@ struct BootConfig {
     bool buffer_heaps{true};
     /// Largest buffer placed in those heaps, in MiB ("buffer_heap_max_mib=N", 1 to 16).
     u32 buffer_heap_max_mib{16};
+    /// Transfer buffers placed in pooled heaps too ("transfer_heaps=0|1").
+    bool transfer_heaps{true};
     /// Seconds an extra empty texture heap is kept without pressure ("idle_heap_seconds=N").
     u32 idle_heap_seconds{10};
     /// 3D textures in GPU memory, not the CPU-writable heaps ("volumes_in_gpu_memory=0|1"; off).
@@ -233,6 +235,8 @@ struct BootConfig {
     bool bc_volume_stream{true};
     /// Games on external storage read through a block cache ("rom_cache=0|1"; off by default).
     bool rom_cache{};
+    /// Games on external storage learn their read order and read ahead ("rom_learn=0|1").
+    bool rom_learn{true};
     /// The cache also reads ahead of in-order reads ("rom_readahead=0|1"; off by default).
     bool rom_readahead{};
     /// Fine per-draw D3D12 CPU timers ("gpu_profile=1"). Off because clock reads are measurable.

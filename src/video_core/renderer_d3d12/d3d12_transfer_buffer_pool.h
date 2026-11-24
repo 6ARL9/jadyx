@@ -11,6 +11,7 @@
 #include <string_view>
 #include <vector>
 
+#include "video_core/renderer_d3d12/d3d12_buffer_heap_pool.h"
 #include "video_core/renderer_d3d12/d3d12_device.h"
 
 namespace D3D12 {
@@ -53,6 +54,11 @@ public:
     void TrimStale(bool emergency);
 
     [[nodiscard]] u64 PooledBytes() const;
+
+    /// The heaps new transfer buffers are placed in, for the log.
+    [[nodiscard]] std::string HeapReport() const {
+        return heaps.Report();
+    }
 
     /// Bytes of buffers released past the pool's budget while recording the current submission:
     /// they stay allocated until it completes, so the recorder submits once they add up.
@@ -98,6 +104,8 @@ private:
 
     const Device& device;
     Scheduler& scheduler;
+    /// New buffers are placed here (made ahead on another thread) before being committed.
+    BufferHeapPool heaps;
     mutable std::mutex mutex;
     std::vector<Entry> entries;
     std::map<std::string_view, UserStats> user_stats;

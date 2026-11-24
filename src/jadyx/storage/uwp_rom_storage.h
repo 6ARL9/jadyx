@@ -32,6 +32,10 @@ void SetRomReadCache(bool enabled);
 /// Whether that cache also reads 4 MiB ahead of in-order reads (boot.cfg "rom_readahead=0|1";
 /// off by default: on a hard drive the game's own reads waited behind it).
 void SetRomReadAhead(bool enabled);
+/// Whether games on external storage learn which blocks follow which, and have the next ones
+/// read ahead on later visits (boot.cfg "rom_learn=0|1"; on by default). Journals are kept in
+/// LocalState/rom-learn.
+void SetRomLearn(bool enabled);
 // Bounded preflight, run on an MTA worker before starting the guest. Reports
 // access/removal errors in the library instead of closing the application.
 std::string CheckExternalGame(std::string_view path);

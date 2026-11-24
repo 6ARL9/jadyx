@@ -730,12 +730,13 @@ void RendererD3D12::ReportPerfWindow(u32 frames, double total_ms) {
         LOG_INFO(Render,
                  "D3D12 transfer buffers: {} reused, {} created ({} with a fitting buffer still "
                  "in use by the GPU, {} with none of a fitting size; {:.2f} MiB), {} released over "
-                 "the pool budget ({:.2f} MiB); {:.2f} MiB pooled now",
+                 "the pool budget ({:.2f} MiB); {:.2f} MiB pooled now; {}",
                  get(Counter::TransferPoolHits),
                  get(Counter::TransferPoolMissBusy) + get(Counter::TransferPoolMissNoFit),
                  get(Counter::TransferPoolMissBusy), get(Counter::TransferPoolMissNoFit),
                  mib(get(Counter::TransferPoolMissBytes)), get(Counter::TransferPoolOverflows),
-                 mib(get(Counter::TransferPoolOverflowBytes)), mib(transfer_buffers.PooledBytes()));
+                 mib(get(Counter::TransferPoolOverflowBytes)), mib(transfer_buffers.PooledBytes()),
+                 transfer_buffers.HeapReport());
         if (VideoCore::Perf::DetailedGpuProfileEnabled()) {
             LOG_INFO(Render, "D3D12 transfer buffer users: {}", transfer_buffers.TakeUserReport());
         }

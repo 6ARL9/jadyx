@@ -328,6 +328,7 @@ void ApplyBootConfig(const BootConfig& config, const BootSurface& surface, bool 
     D3D12::SetVolumeUploadBudget(config.volume_upload_mib);
     SetRomReadCache(config.rom_cache);
     SetRomReadAhead(config.rom_readahead);
+    SetRomLearn(config.rom_learn);
     Tegra::Texture::SetParallelUnswizzle(config.parallel_unswizzle);
     D3D12::SetTextureMemoryCap(u64{config.texture_cap_mib} << 20);
     D3D12::SetTextureMemoryLine(
@@ -337,6 +338,7 @@ void ApplyBootConfig(const BootConfig& config, const BootSurface& surface, bool 
     D3D12::SetSpareHeaps(config.spare_heaps);
     D3D12::SetBufferHeaps(config.buffer_heaps);
     D3D12::SetBufferHeapMaxMiB(config.buffer_heap_max_mib);
+    D3D12::SetTransferHeaps(config.transfer_heaps);
     D3D12::SetIdleHeapSeconds(config.idle_heap_seconds);
     D3D12::SetGpuUnswizzle(config.gpu_unswizzle);
     D3D12::MemoryReserve::Configure(u64{config.oom_reserve_mib} << 20);

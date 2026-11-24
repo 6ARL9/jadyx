@@ -27,6 +27,7 @@ using namespace Common::Literals;
 
 namespace {
 std::atomic_bool buffer_heaps{true};
+std::atomic_bool transfer_heaps{true};
 /// Larger buffers stay committed ("buffer_heap_max_mib=N", 1 to 16). 4 MiB in 0.4.4.10, where the
 /// 9 to 10 MiB buffers committed each session took about 95 ms each.
 std::atomic<u64> max_placed{16_MiB};
@@ -75,6 +76,10 @@ ComPtr<ID3D12Heap> MakeHeap(ID3D12Device* device) {
 
 void SetBufferHeaps(bool enabled) {
     buffer_heaps.store(enabled, std::memory_order_relaxed);
+}
+
+void SetTransferHeaps(bool enabled) {
+    transfer_heaps.store(enabled, std::memory_order_relaxed);
 }
 
 void SetBufferHeapMaxMiB(u32 mib) {
@@ -278,8 +283,13 @@ struct BufferHeapPool::SpareWorker {
     }
 };
 
-BufferHeapPool::BufferHeapPool(const Device& device_)
-    : device{device_}, state{std::make_shared<State>()},
+bool BufferHeapPool::Enabled() const {
+    return (use == BufferHeapUse::CachedBuffers ? buffer_heaps : transfer_heaps)
+        .load(std::memory_order_relaxed);
+}
+
+BufferHeapPool::BufferHeapPool(const Device& device_, BufferHeapUse use_)
+    : device{device_}, use{use_}, state{std::make_shared<State>()},
       spare_worker{std::make_unique<SpareWorker>()} {
     spare_worker->thread = std::jthread{[this](std::stop_token stop) {
         Common::SetCurrentThreadName("D3D12BufferHeaps");
@@ -294,7 +304,7 @@ BufferHeapPool::BufferHeapPool(const Device& device_)
         }
     }};
     // The first heap too: the first buffers of a game arrive in a burst.
-    if (buffer_heaps.load(std::memory_order_relaxed)) spare_worker->Request();
+    if (Enabled()) spare_worker->Request();
 }
 
 BufferHeapPool::~BufferHeapPool() {
@@ -302,7 +312,7 @@ BufferHeapPool::~BufferHeapPool() {
 }
 
 ComPtr<ID3D12Resource> BufferHeapPool::Create(u64 size) {
-    if (!buffer_heaps.load(std::memory_order_relaxed) || size == 0) return {};
+    if (!Enabled() || size == 0) return {};
     if (size > max_placed.load(std::memory_order_relaxed)) {
         std::scoped_lock lock{state->mutex};
         ++state->too_large;
@@ -390,10 +400,11 @@ std::string BufferHeapPool::Report() const {
     std::scoped_lock lock{state->mutex};
     size_t heaps = 0;
     for (const auto& block : state->blocks) heaps += block.heap != nullptr;
-    return fmt::format("buffer heaps {} ({} MiB, {} MiB live, peak {} MiB live); {} buffers "
+    return fmt::format("{} heaps {} ({} MiB, {} MiB live, peak {} MiB live); {} buffers "
                        "placed, committed {} too large, {} short of memory, {} failed; heaps made "
                        "{} on the GPU thread, {} ahead ({} used), {} released",
-                       heaps, state->heap_bytes / 1_MiB, state->live_bytes / 1_MiB,
+                       use == BufferHeapUse::CachedBuffers ? "buffer" : "transfer", heaps,
+                       state->heap_bytes / 1_MiB, state->live_bytes / 1_MiB,
                        state->peak_live_bytes / 1_MiB, state->placed, state->too_large,
                        state->refused, state->failed, state->grown_inline, state->spares_made,
                        state->spares_used, state->released);

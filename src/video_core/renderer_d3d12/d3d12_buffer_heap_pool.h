@@ -16,6 +16,15 @@ namespace D3D12 {
 void SetBufferHeaps(bool enabled);
 /// Buffers up to this many MiB are placed (1 to 16; 16 by default, 4 in 0.4.4.10).
 void SetBufferHeapMaxMiB(u32 mib);
+/// Transfer buffers placed in pooled heaps too ("transfer_heaps=0" turns it off): one of 64 KiB
+/// took 528 ms to commit mid-game in Metroid Prime Remastered, one of 8 MiB 168 ms in Mario Kart
+/// 8 Deluxe, and three of 1.6 MiB about 450 ms each while Metroid's title screen played.
+void SetTransferHeaps(bool enabled);
+
+enum class BufferHeapUse {
+    CachedBuffers,   ///< the buffer cache's (buffer_heaps)
+    TransferBuffers, ///< TransferBufferPool's (transfer_heaps)
+};
 
 /// Places the buffer cache's buffers in shared DEFAULT heaps. A committed buffer is an allocation
 /// of its own from the system: Metroid Prime Remastered made 100 to 170 of them in one frame at
@@ -29,7 +38,8 @@ void SetBufferHeapMaxMiB(u32 mib);
 /// Contents are not zeroed, as with a recycled buffer: the cache uploads what it binds.
 class BufferHeapPool {
 public:
-    explicit BufferHeapPool(const Device& device);
+    explicit BufferHeapPool(const Device& device,
+                            BufferHeapUse use = BufferHeapUse::CachedBuffers);
     ~BufferHeapPool();
 
     BufferHeapPool(const BufferHeapPool&) = delete;
@@ -50,7 +60,10 @@ public:
 
 private:
     struct SpareWorker;
+    [[nodiscard]] bool Enabled() const;
+
     const Device& device;
+    BufferHeapUse use;
     std::shared_ptr<State> state;
     u64 frame{};
     std::unique_ptr<SpareWorker> spare_worker; ///< last: stopped before the members it uses
