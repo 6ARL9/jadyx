@@ -362,7 +362,11 @@ private:
             Tick();
             if (std::chrono::steady_clock::now() - window_start >=
                 std::chrono::seconds(options.window_seconds)) {
+                // Formatting and writing a window takes a while: below the game's threads, so
+                // it does not take a processor from them.
+                SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
                 WriteWindow();
+                SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
                 StartWindow();
             }
         }
