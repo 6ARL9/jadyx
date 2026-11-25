@@ -506,11 +506,11 @@ void RendererD3D12::ReportPerf(double interval_ms) {
     hitch.host = host;
     // Host trim's total at each present of the last few seconds.
     constexpr u64 TRIM_LOOKBACK_NS = 2'000'000'000;
-    auto& trim_history = hitch.trim_history;
-    while (!trim_history.empty() && host.time_ns - trim_history.front().first > 2 * TRIM_LOOKBACK_NS) {
-        trim_history.erase(trim_history.begin());
+    auto& history = hitch.trim_history;
+    while (!history.empty() && host.time_ns - history.front().first > 2 * TRIM_LOOKBACK_NS) {
+        history.erase(history.begin());
     }
-    trim_history.emplace_back(host.time_ns, host.trim_released);
+    history.emplace_back(host.time_ns, host.trim_released);
     const u64 longest_fs_queue_us =
         Common::HostStalls::longest_fs_queue_us.exchange(0, std::memory_order_relaxed);
     // Every frame, so a hitch names only its own submissions.

@@ -532,11 +532,11 @@ private:
             LOG_INFO(Common, "profiler: thread states available ({} KiB of process information)",
                      needed / 1024);
         }
-        if (thread_index_generation != seen_generation) {
-            thread_index_generation = seen_generation;
-            thread_index.clear();
+        if (thread_by_id_generation != seen_generation) {
+            thread_by_id_generation = seen_generation;
+            thread_by_id.clear();
             for (u32 index = 0; index < threads.size(); ++index) {
-                thread_index[threads[index]->id] = index;
+                thread_by_id[threads[index]->id] = index;
             }
         }
         const auto own = static_cast<ULONG_PTR>(GetCurrentProcessId());
@@ -555,8 +555,8 @@ private:
                     std::memcpy(&info, state_buffer.data() + at, sizeof(info));
                     const auto id = static_cast<DWORD>(
                         reinterpret_cast<ULONG_PTR>(info.unique_thread));
-                    const auto found = thread_index.find(id);
-                    if (found == thread_index.end()) {
+                    const auto found = thread_by_id.find(id);
+                    if (found == thread_by_id.end()) {
                         continue;
                     }
                     // Waits keep their reason; other states (ready, running, standby) do not
@@ -1000,8 +1000,8 @@ private:
     bool states_logged{};
     u64 state_queries{};
     u64 state_queries_ns{};
-    std::unordered_map<DWORD, u32> thread_index;
-    u64 thread_index_generation{~u64{}};
+    std::unordered_map<DWORD, u32> thread_by_id;
+    u64 thread_by_id_generation{~u64{}};
     /// thread, stalled, state, wait reason: ticks seen.
     std::map<std::tuple<u32, bool, u32, u32>, u64> thread_states;
     std::map<std::tuple<u32, u64, u64>, u64> thunk_samples; // thread, top two stack words
