@@ -50,6 +50,10 @@ public:
     Result LoopProcess();
     void RequestStop();
     void StartAdditionalHostThreads(const char* name, size_t num_threads);
+    /// Counts this server's requests as the file service's (Common::HostStalls Fs counters).
+    void SetFileServiceTimed(bool timed) {
+        m_file_service_timed = timed;
+    }
 
     static void RunServer(std::unique_ptr<ServerManager>&& server);
 
@@ -102,6 +106,7 @@ private:
     Common::Event m_stopped{};
     std::vector<std::jthread> m_threads{};
     std::stop_source m_stop_source{};
+    bool m_file_service_timed{};
 };
 
 } // namespace Service

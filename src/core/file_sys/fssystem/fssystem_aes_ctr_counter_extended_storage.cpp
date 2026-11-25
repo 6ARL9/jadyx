@@ -4,6 +4,7 @@
 // SPDX-FileCopyrightText: Copyright 2023 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include "common/host_stalls.h"
 #include "core/file_sys/fssystem/fssystem_aes_ctr_counter_extended_storage.h"
 #include "core/file_sys/fssystem/fssystem_aes_ctr_storage.h"
 #include "core/file_sys/fssystem/fssystem_nca_header.h"
@@ -243,6 +244,7 @@ size_t AesCtrCounterExtendedStorage::Read(u8* buffer, size_t size, size_t offset
 }
 
 void SoftwareDecryptor::Decrypt(u8* buf, size_t buf_size, const std::array<u8, AesCtrCounterExtendedStorage::KeySize>& key, const std::array<u8, AesCtrCounterExtendedStorage::IvSize>& iv) {
+    const Common::HostStalls::ScopedUs decrypt_timer{Common::HostStalls::Counter::FsDecryptUs};
     Core::Crypto::AESCipher<Core::Crypto::Key128> cipher(key, Core::Crypto::Mode::CTR);
     cipher.SetIV(iv);
     cipher.Transcode(buf, buf_size, buf, Core::Crypto::Op::Decrypt);

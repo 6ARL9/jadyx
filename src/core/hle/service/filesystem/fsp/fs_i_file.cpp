@@ -4,6 +4,10 @@
 // SPDX-FileCopyrightText: Copyright 2023 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <chrono>
+
+#include "common/host_stalls.h"
+#include "common/storage_trace.h"
 #include "core/file_sys/errors.h"
 #include "core/hle/service/cmif_serialization.h"
 #include "core/hle/service/filesystem/fsp/fs_i_file.h"
@@ -44,8 +48,20 @@ Result IFile::Read(
               size);
 
     // Read the data from the Storage backend
-    R_RETURN(
-        backend->Read(reinterpret_cast<size_t*>(out_size.Get()), offset, out_buffer.data(), size));
+    const auto start = std::chrono::steady_clock::now();
+    const u64 trace_us = Common::StorageTrace::NowUs();
+    const Result result =
+        backend->Read(reinterpret_cast<size_t*>(out_size.Get()), offset, out_buffer.data(), size);
+    using Counter = Common::HostStalls::Counter;
+    Common::HostStalls::Add(Counter::FsReads, 1);
+    Common::HostStalls::Add(Counter::FsReadBytes, size > 0 ? static_cast<u64>(size) : 0);
+    if (Common::StorageTrace::enabled.load(std::memory_order_relaxed)) {
+        Common::StorageTrace::Record('F', Common::StorageTrace::IdOf(this), trace_us,
+                                     static_cast<u64>(offset), size > 0 ? static_cast<u64>(size) : 0,
+                                     Common::HostStalls::fs_request_queue_us, 0,
+                                     Common::HostStalls::UsSince(start));
+    }
+    R_RETURN(result);
 }
 
 Result IFile::Write(

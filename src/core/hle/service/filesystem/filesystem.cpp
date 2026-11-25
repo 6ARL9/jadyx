@@ -801,6 +801,7 @@ void FileSystemController::Reset() {
 
 void LoopProcess(Core::System& system) {
     auto server_manager = std::make_unique<ServerManager>(system);
+    server_manager->SetFileServiceTimed(true);
 
     const auto FileSystemProxyFactory = [&] { return std::make_shared<FSP_SRV>(system); };
 

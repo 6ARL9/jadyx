@@ -483,6 +483,12 @@ void ParseBootConfigFile(const std::string& install_path, BootConfig& config) {
                           (config.rom_learn ? "on" : "off"));
                 continue;
             }
+            if (line == "rom_trace=0" || line == "rom_trace=1") {
+                config.rom_trace = line.back() == '1';
+                WriteDiag(std::string{"boot.cfg: ROM read trace "} +
+                          (config.rom_trace ? "on" : "off"));
+                continue;
+            }
             if (line == "rom_readahead=0" || line == "rom_readahead=1") {
                 config.rom_readahead = line.back() == '1';
                 WriteDiag(std::string{"boot.cfg: ROM read-ahead "} +
@@ -848,6 +854,18 @@ void ParseBootConfigFile(const std::string& install_path, BootConfig& config) {
                 config.gpu_profile = true;
                 config.cpu_profile = true;
                 WriteDiag("boot.cfg: sampling profiler with GPU and CPU timers");
+            } else if (line.starts_with("profile_stall_ms=") ||
+                       line.starts_with("profile_stall_stride=")) {
+                const bool ms = line.starts_with("profile_stall_ms=");
+                const std::string value = line.substr(line.find('=') + 1);
+                const unsigned long parsed = std::strtoul(value.c_str(), nullptr, 10);
+                if (ms && parsed >= 10 && parsed <= 1000) {
+                    config.profile_stall_ms = static_cast<u32>(parsed);
+                } else if (!ms && parsed >= 1 && parsed <= 64) {
+                    config.profile_stall_stride = static_cast<u32>(parsed);
+                } else {
+                    WriteDiag("boot.cfg: invalid " + line + ", ignored");
+                }
             } else if (line.starts_with("profile_hz=") ||
                        line.starts_with("profile_window=")) {
                 const bool hz = line.starts_with("profile_hz=");

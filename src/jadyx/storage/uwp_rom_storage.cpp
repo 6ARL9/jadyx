@@ -34,6 +34,7 @@
 #include <winrt/Windows.System.h>
 #include "common/host_stalls.h"
 #include "common/logging.h"
+#include "common/storage_trace.h"
 #include "core/file_sys/vfs/vfs_real.h"
 #include "core/loader/nro.h"
 
@@ -889,6 +890,8 @@ public:
         if (offset >= size || !length || !data) return 0;
         length = std::min(length, size - offset);
         const Common::HostStalls::FileReadTimer read_timer;
+        const u64 trace_us = Common::StorageTrace::NowUs();
+        const auto trace_start = std::chrono::steady_clock::now();
         if (handle != INVALID_HANDLE_VALUE && rom_cache_enabled.load(std::memory_order_relaxed)) {
             RomReadCache& cache = RomReadCache::Instance();
             const bool read = cache.Read(cache_id, size, data, length, offset,
@@ -916,6 +919,7 @@ public:
                 cache.Learn(cache_id, offset, length);
             }
             read_timer.Done(length);
+            Trace(trace_us, trace_start, offset, length);
             return length;
         }
         if (learning) {
@@ -932,6 +936,7 @@ public:
             }
             cache.Learn(cache_id, offset, length);
             read_timer.Done(length);
+            Trace(trace_us, trace_start, offset, length);
             return length;
         }
         std::scoped_lock lock{mutex}; // Serialize seek+read on this file, not the whole VFS.
@@ -977,9 +982,18 @@ public:
         }
         if (done != length) LogReadFailure(ERROR_READ_FAULT);
         read_timer.Done(done);
+        Trace(trace_us, trace_start, offset, done);
         return done;
     }
 private:
+    /// One disk read for the storage trace (rom_trace).
+    void Trace(u64 trace_us, std::chrono::steady_clock::time_point start, size_t offset,
+               size_t bytes) const {
+        if (Common::StorageTrace::enabled.load(std::memory_order_relaxed)) {
+            Common::StorageTrace::Record('D', Common::StorageTrace::IdOf(this), trace_us, offset,
+                                         bytes, Common::HostStalls::UsSince(start), 0, 0);
+        }
+    }
     void LogReadFailure(unsigned error) const {
         storage_read_failure.store(true);
         if (!failed.exchange(true))

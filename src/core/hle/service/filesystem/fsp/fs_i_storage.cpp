@@ -8,6 +8,8 @@
 #include <chrono>
 #include <thread>
 
+#include "common/host_stalls.h"
+#include "common/storage_trace.h"
 #include "core/file_sys/errors.h"
 #include "core/hle/service/cmif_serialization.h"
 #include "core/hle/service/filesystem/fsp/fs_i_storage.h"
@@ -52,8 +54,11 @@ Result IStorage::Read(
     // but loads made of many small reads may take longer: if a load time regression shows up
     // on the Series, compare against a build without this block first.
     const auto now = std::chrono::steady_clock::now();
+    const u64 trace_us = Common::StorageTrace::NowUs();
+    u64 paced_us = 0;
     if (now < next_read_tick) {
         std::this_thread::sleep_for(next_read_tick - now);
+        paced_us = Common::HostStalls::UsSince(now);
     }
     next_read_tick = std::chrono::steady_clock::now() +
                      std::chrono::nanoseconds{std::min(length, MaxChargedReadSize) *
@@ -61,6 +66,17 @@ Result IStorage::Read(
 
     // Read the data from the Storage backend
     backend->Read(out_bytes.data(), length, offset);
+
+    using Counter = Common::HostStalls::Counter;
+    Common::HostStalls::Add(Counter::FsReads, 1);
+    Common::HostStalls::Add(Counter::FsReadBytes, static_cast<u64>(length));
+    Common::HostStalls::Add(Counter::FsPaceUs, paced_us);
+    if (Common::StorageTrace::enabled.load(std::memory_order_relaxed)) {
+        Common::StorageTrace::Record('G', Common::StorageTrace::IdOf(this), trace_us,
+                                     static_cast<u64>(offset), static_cast<u64>(length),
+                                     Common::HostStalls::fs_request_queue_us, paced_us,
+                                     Common::HostStalls::UsSince(now));
+    }
 
     R_SUCCEED();
 }

@@ -34,6 +34,7 @@
 #include <winrt/Windows.ApplicationModel.h>
 #include <winrt/Windows.Storage.h>
 
+#include "common/storage_trace.h"
 #include "common/bug_tracker.h"
 #include "common/fs/path_util.h"
 #include "common/logging.h"
@@ -238,6 +239,7 @@ void GameSession::Shutdown() {
     memory.reset();
     pulse_screen.reset();
     launch_screen.reset();
+    Common::StorageTrace::Flush();
     Common::SamplingProfiler::Stop(); // writes the window in progress, if it runs
     Common::SamplingProfiler::SetGuestCodeReader({}, 0);
     if (config.gpu_failure_probe) WriteDiag("GPU recovery shutdown: input.Stop");
@@ -597,9 +599,14 @@ void GameSession::StartGuest() {
             Common::FS::GetEdenPath(Common::FS::EdenPath::LogDir) / "jadyx_profile.txt";
         Common::SamplingProfiler::Start({.hz = config.profile_hz,
                                          .window_seconds = config.profile_window,
+                                         .stall_ms = config.profile_stall_ms,
+                                         .stall_stride = config.profile_stall_stride,
                                          .output = output});
         WriteDiag("step: sampling profiler on, " + std::to_string(config.profile_hz) +
-                  " Hz, " + std::to_string(config.profile_window) + " s windows");
+                  " Hz, " + std::to_string(config.profile_window) + " s windows, all threads " +
+                  "once in " + std::to_string(config.profile_stall_stride) +
+                  " ticks while a frame is " + std::to_string(config.profile_stall_ms) +
+                  " ms late");
     }
     // Run the guest. CpuManager spins up guest threads; dynarmic compiles + executes their code.
     // A resume's screen stays over it until the game presents.

@@ -34,6 +34,10 @@ struct Options {
     u32 hz{250};
     /// Seconds per report window.
     u32 window_seconds{20};
+    /// How late a frame has to be, in ms, for every thread to be sampled whether it runs or not.
+    u32 stall_ms{120};
+    /// While a frame is that late, every thread is sampled once in this many ticks.
+    u32 stall_stride{8};
     /// File the windows are appended to; truncated by Start.
     std::filesystem::path output;
 };
@@ -46,8 +50,10 @@ void Stop();
 
 [[nodiscard]] bool Running();
 
-/// A frame was finished. While the next one is more than 120 ms late, every thread is sampled, with
-/// state S, whether it runs or not. Cheap; safe before Start.
+/// A frame was finished. While the next one is more than Options::stall_ms late, every thread is
+/// sampled, with state S if it ran since the previous tick and B if it did not (blocked, or ready
+/// without a processor: the "threadstate" lines tell which), and the system's view of each
+/// thread's state is counted. Cheap; safe before Start.
 void NoteFrame();
 
 /// Steady-clock time of the last NoteFrame, in ns; 0 before the first frame.

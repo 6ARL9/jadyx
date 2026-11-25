@@ -5,6 +5,7 @@
 #include <chrono>
 #include <string>
 
+#include "common/host_stalls.h"
 #include "common/host_memory.h"
 #include "common/permafrost.h"
 #include "common/settings.h"
@@ -122,6 +123,11 @@ void SessionMemory::RunHostTrim(std::stop_token stop) {
         pass_released += trim.released;
         g_host_trim_visited.fetch_add(trim.visited, std::memory_order_relaxed);
         g_host_trim_released.fetch_add(trim.released, std::memory_order_relaxed);
+        Common::HostStalls::Add(Common::HostStalls::Counter::TrimReleasedBytes, trim.released);
+        Common::HostStalls::Add(
+            Common::HostStalls::Counter::TrimBusyUs,
+            static_cast<u64>(
+                std::chrono::duration_cast<std::chrono::microseconds>(slice_time).count()));
         if (cursor <= before) {
             last_pass_released = pass_released;
             pass_released = 0;

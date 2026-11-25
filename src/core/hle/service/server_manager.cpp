@@ -4,9 +4,11 @@
 // SPDX-FileCopyrightText: Copyright 2023 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <chrono>
 #include <mutex>
 #include <unordered_map>
 
+#include "common/host_stalls.h"
 #include "common/scope_exit.h"
 
 #include "core/core.h"
@@ -395,8 +397,24 @@ Result ServerManager::OnSessionEvent(Session* session) {
 
     R_ASSERT(res);
 
-    // Complete the sync request with deferral handling.
-    R_RETURN(this->CompleteSyncRequest(session));
+    if (!m_file_service_timed) {
+        // Complete the sync request with deferral handling.
+        R_RETURN(this->CompleteSyncRequest(session));
+    }
+    // The file service: how long the request waited for this thread, and how long it took.
+    using Counter = Common::HostStalls::Counter;
+    const auto start = std::chrono::steady_clock::now();
+    const u64 arrival = server_session->CurrentArrivalNs();
+    const u64 now_ns = static_cast<u64>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(start.time_since_epoch()).count());
+    const u64 queued_us = arrival != 0 && now_ns > arrival ? (now_ns - arrival) / 1000 : 0;
+    Common::HostStalls::fs_request_queue_us = queued_us;
+    Common::HostStalls::Add(Counter::FsRequests, 1);
+    Common::HostStalls::Add(Counter::FsQueueUs, queued_us);
+    Common::HostStalls::RaiseLongestUs(Common::HostStalls::longest_fs_queue_us, queued_us);
+    const Result completed = this->CompleteSyncRequest(session);
+    Common::HostStalls::Add(Counter::FsHandleUs, Common::HostStalls::UsSince(start));
+    R_RETURN(completed);
 }
 
 Result ServerManager::CompleteSyncRequest(Session* session) {

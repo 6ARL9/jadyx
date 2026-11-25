@@ -30,9 +30,8 @@ namespace Common::SamplingProfiler {
 namespace {
 
 constexpr size_t MAX_FRAMES = 96;
-/// How late a frame has to be for every thread to be sampled, and every how many ticks.
-constexpr u64 STALL_NS = 120'000'000;
-constexpr u32 STALL_STRIDE = 8;
+/// Outside stalls, the threads' system states are counted once in this many ticks.
+constexpr u32 STATE_STRIDE = 25;
 /// Elapsed context capture, including time waiting for suspension to take effect.
 constexpr u64 SLOW_CAPTURE_NS = CaptureBackoff::SLOW_NS;
 
@@ -250,17 +249,60 @@ size_t UnwindCopy(CONTEXT context, const u8* copy, size_t copied, ULONG_PTR orig
     return depth;
 }
 
+/// The system's view of a thread (NtQuerySystemInformation, SystemProcessInformation): its
+/// scheduling state and, while it waits, why (KTHREAD_STATE and KWAIT_REASON values).
+struct SystemThreadInfo {
+    LARGE_INTEGER kernel_time;
+    LARGE_INTEGER user_time;
+    LARGE_INTEGER create_time;
+    ULONG wait_time;
+    PVOID start_address;
+    HANDLE unique_process;
+    HANDLE unique_thread;
+    LONG priority;
+    LONG base_priority;
+    ULONG context_switches;
+    ULONG thread_state;
+    ULONG wait_reason;
+};
+static_assert(sizeof(SystemThreadInfo) == 0x50);
+/// The fixed part of SYSTEM_PROCESS_INFORMATION; its threads follow it.
+struct SystemProcessInfo {
+    ULONG next_entry_offset;
+    ULONG number_of_threads;
+    u8 unused1[0x50 - 8];
+    HANDLE unique_process_id;
+    u8 unused2[0x100 - 0x58];
+};
+static_assert(sizeof(SystemProcessInfo) == 0x100);
+using NtQuerySystemInformationFn = LONG(WINAPI*)(ULONG, PVOID, ULONG, PULONG);
+constexpr ULONG SYSTEM_PROCESS_INFORMATION_CLASS = 5;
+constexpr LONG STATUS_INFO_LENGTH_MISMATCH_VALUE = static_cast<LONG>(0xC0000004);
+constexpr size_t MAX_STATE_BUFFER = 32 * 1024 * 1024;
+
 class Sampler {
 public:
     explicit Sampler(const Options& options_) : options{options_} {
         options.hz = std::clamp<u32>(options.hz, 10, 1000);
         options.window_seconds = std::max<u32>(options.window_seconds, 1);
+        options.stall_ms = std::clamp<u32>(options.stall_ms, 10, 1000);
+        options.stall_stride = std::clamp<u32>(options.stall_stride, 1, 64);
+        stall_ns = u64{options.stall_ms} * 1'000'000;
+        if (const HMODULE ntdll = GetModuleHandleW(L"ntdll.dll")) {
+            query_system_information = reinterpret_cast<NtQuerySystemInformationFn>(
+                reinterpret_cast<void*>(GetProcAddress(ntdll, "NtQuerySystemInformation")));
+        }
+        state_buffer.resize(1024 * 1024);
         // Reserved once: the copy is written while the target is suspended.
         stack_copy = static_cast<u8*>(VirtualAlloc(nullptr, MAX_STACK_COPY + COPY_SLACK,
                                                    MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE));
         if (std::FILE* file = OpenOutput(output_started ? L"a" : L"w")) {
             output_started = true;
             std::fputs("# jadyx sampling profile v1\n", file);
+            std::fputs(fmt::format("stall_ms {} stall_stride {}\n", options.stall_ms,
+                                   options.stall_stride)
+                           .c_str(),
+                       file);
             WriteModuleIdentity(file);
             std::fclose(file);
         }
@@ -380,6 +422,10 @@ private:
         frame_pool.clear();
         thunk_samples.clear();
         thunk_rips.clear();
+        thread_states.clear();
+        state_queries = 0;
+        state_queries_ns = 0;
+        stall_ticks = 0;
         for (ThreadEntry* entry : threads) {
             entry->window_cpu_start = CpuTime100ns(entry->handle);
             entry->running_samples = 0;
@@ -393,16 +439,36 @@ private:
         RefreshThreads();
         ++window_ticks;
         // A frame late by far: every thread, blocked or not, so the stacks show what holds it up.
+        // Cycles are read every tick, so "ran" means since the previous tick.
         const u64 frame = g_last_frame_ns.load(std::memory_order_relaxed);
-        if (frame != 0 && NowNs() - frame > STALL_NS) {
-            if (window_ticks % STALL_STRIDE == 0) {
-                for (u32 index = 0; index < threads.size(); ++index) {
-                    if (!threads[index]->dead) {
-                        Sample(index, *threads[index], false, 1, true);
-                    }
+        if (frame != 0 && NowNs() - frame > stall_ns) {
+            ++stall_ticks;
+            const bool sample = ++stall_tick_counter % options.stall_stride == 0;
+            if (sample) {
+                CountThreadStates(true);
+            }
+            for (u32 index = 0; index < threads.size(); ++index) {
+                ThreadEntry& entry = *threads[index];
+                if (entry.dead) {
+                    continue;
+                }
+                ULONG64 cycles{};
+                if (!QueryThreadCycleTime(entry.handle, &cycles)) {
+                    entry.dead = true;
+                    continue;
+                }
+                const bool ran = cycles - entry.last_cycles >= RUNNING_CYCLES;
+                entry.last_cycles = cycles;
+                if (sample) {
+                    Sample(index, entry, !ran, 1, true);
+                    QueryThreadCycleTime(entry.handle, &entry.last_cycles);
                 }
             }
             return;
+        }
+        stall_tick_counter = 0;
+        if (window_ticks % STATE_STRIDE == 0) {
+            CountThreadStates(false);
         }
         for (u32 index = 0; index < threads.size(); ++index) {
             ThreadEntry& entry = *threads[index];
@@ -428,6 +494,81 @@ private:
             // Without the suspension's own cycles, or a blocked thread would look running.
             QueryThreadCycleTime(entry.handle, &entry.last_cycles);
         }
+    }
+
+    /// Counts the system's state of every sampled thread. Runs while no thread is suspended.
+    void CountThreadStates(bool stalled) {
+        if (!query_system_information || states_failed) {
+            return;
+        }
+        const u64 start = NowNs();
+        ULONG needed = 0;
+        LONG status = query_system_information(SYSTEM_PROCESS_INFORMATION_CLASS,
+                                               state_buffer.data(),
+                                               static_cast<ULONG>(state_buffer.size()), &needed);
+        if (status == STATUS_INFO_LENGTH_MISMATCH_VALUE) {
+            const size_t grown = std::max<size_t>(state_buffer.size() * 2, needed + 256 * 1024);
+            if (grown > MAX_STATE_BUFFER) {
+                states_failed = true;
+                LOG_WARNING(Common, "profiler: thread states need {} KiB, not counted",
+                            grown / 1024);
+                return;
+            }
+            state_buffer.resize(grown);
+            return; // next time
+        }
+        if (status < 0) {
+            states_failed = true;
+            LOG_WARNING(Common, "profiler: thread states not available (status {:#x})",
+                        static_cast<u32>(status));
+            return;
+        }
+        if (!states_logged) {
+            states_logged = true;
+            LOG_INFO(Common, "profiler: thread states available ({} KiB of process information)",
+                     needed / 1024);
+        }
+        if (thread_index_generation != seen_generation) {
+            thread_index_generation = seen_generation;
+            thread_index.clear();
+            for (u32 index = 0; index < threads.size(); ++index) {
+                thread_index[threads[index]->id] = index;
+            }
+        }
+        const auto own = static_cast<ULONG_PTR>(GetCurrentProcessId());
+        size_t offset = 0;
+        while (offset + sizeof(SystemProcessInfo) <= state_buffer.size()) {
+            SystemProcessInfo process;
+            std::memcpy(&process, state_buffer.data() + offset, sizeof(process));
+            if (reinterpret_cast<ULONG_PTR>(process.unique_process_id) == own) {
+                const size_t first = offset + sizeof(SystemProcessInfo);
+                for (ULONG i = 0; i < process.number_of_threads; ++i) {
+                    const size_t at = first + i * sizeof(SystemThreadInfo);
+                    if (at + sizeof(SystemThreadInfo) > state_buffer.size()) {
+                        break;
+                    }
+                    SystemThreadInfo info;
+                    std::memcpy(&info, state_buffer.data() + at, sizeof(info));
+                    const auto id = static_cast<DWORD>(
+                        reinterpret_cast<ULONG_PTR>(info.unique_thread));
+                    const auto found = thread_index.find(id);
+                    if (found == thread_index.end()) {
+                        continue;
+                    }
+                    // Waits keep their reason; other states (ready, running, standby) do not
+                    // have one.
+                    const u32 reason = info.thread_state == 5 ? info.wait_reason : 0xff;
+                    ++thread_states[{found->second, stalled, info.thread_state, reason}];
+                }
+                break;
+            }
+            if (process.next_entry_offset == 0) {
+                break;
+            }
+            offset += process.next_entry_offset;
+        }
+        state_queries_ns += NowNs() - start;
+        ++state_queries;
     }
 
     bool Capture(ThreadEntry& entry, CONTEXT& context, size_t& copied, ULONG_PTR& origin) {
@@ -566,12 +707,15 @@ private:
         std::fputs(
             fmt::format("window {} seconds {:.3f} hz {} ticks {} sampler_cpu_ms {:.1f} "
                         "suspensions {} suspended_us_avg {:.1f} suspended_us_max {:.1f} "
-                        "stacks {} dropped_samples {}\n",
+                        "stacks {} dropped_samples {} stall_ticks {} state_queries {} "
+                        "state_query_us_avg {:.1f}\n",
                         ++window_counter, seconds, options.hz, window_ticks,
                         static_cast<double>(sampler_cpu) / 1e4, suspensions,
                         suspensions ? static_cast<double>(suspended_ns) / 1e3 / suspensions : 0.0,
                         static_cast<double>(max_suspended_ns) / 1e3, stacks.size(),
-                        dropped_samples)
+                        dropped_samples, stall_ticks, state_queries,
+                        state_queries ? static_cast<double>(state_queries_ns) / 1e3 / state_queries
+                                      : 0.0)
                 .c_str(),
             file);
         u64 skipped = 0, slow = 0;
@@ -609,19 +753,67 @@ private:
                            .c_str(),
                        file);
         }
-        std::vector<size_t> order(stacks.size());
-        for (size_t i = 0; i < order.size(); ++i) {
-            order[i] = i;
+        // The system's state of each thread, by tick kind (N: normal, S: a stalled frame).
+        for (const auto& [key, count] : thread_states) {
+            const auto& [owner, stalled, state, reason] = key;
+            std::fputs(fmt::format("threadstate {} {} {} {} {}\n", names[owner],
+                                   stalled ? 'S' : 'N', state, reason, count)
+                           .c_str(),
+                       file);
         }
-        std::ranges::sort(order, [this](size_t a, size_t b) {
-            return stacks[a].count > stacks[b].count;
-        });
-        std::string line;
-        for (const size_t index : order) {
+        // Stacks that differ only in JIT code addresses print alike ("[jit]"): one line each.
+        const auto state_of = [](const StackRecord& record) {
+            return record.stalled ? (record.waiting ? 'B' : 'S') : record.waiting ? 'W' : 'R';
+        };
+        struct Merged {
+            size_t record;
+            u64 count;
+            size_t first;
+            size_t depth;
+        };
+        std::vector<Merged> merged;
+        std::vector<DWORD64> merged_frames;
+        std::unordered_multimap<u64, size_t> merged_index;
+        std::vector<DWORD64> normalized;
+        for (size_t index = 0; index < stacks.size(); ++index) {
             const StackRecord& record = stacks[index];
+            normalized.clear();
+            u64 hash = 0xcbf29ce484222325ULL ^ (u64{record.thread} << 8) ^
+                       static_cast<u64>(state_of(record));
+            for (size_t i = 0; i < record.depth; ++i) {
+                DWORD64 base{};
+                const DWORD64 pc = frame_pool[record.first_frame + i];
+                ModuleName(pc, base);
+                normalized.push_back(base == 0 ? 0 : pc);
+                hash = (hash ^ normalized.back()) * 0x100000001b3ULL;
+            }
+            bool found = false;
+            const auto [begin, end] = merged_index.equal_range(hash);
+            for (auto it = begin; it != end; ++it) {
+                Merged& candidate = merged[it->second];
+                const StackRecord& other = stacks[candidate.record];
+                if (other.thread == record.thread && state_of(other) == state_of(record) &&
+                    candidate.depth == normalized.size() &&
+                    std::equal(normalized.begin(), normalized.end(),
+                               merged_frames.begin() + candidate.first)) {
+                    candidate.count += record.count;
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) {
+                merged_index.emplace(hash, merged.size());
+                merged.push_back({index, record.count, merged_frames.size(), normalized.size()});
+                merged_frames.insert(merged_frames.end(), normalized.begin(), normalized.end());
+            }
+        }
+        std::ranges::sort(merged, [](const Merged& a, const Merged& b) { return a.count > b.count; });
+        std::string line;
+        for (const Merged& entry : merged) {
+            const StackRecord& record = stacks[entry.record];
             line.clear();
             fmt::format_to(std::back_inserter(line), "stack {} {} {} ", names[record.thread],
-                           record.stalled ? 'S' : record.waiting ? 'W' : 'R', record.count);
+                           state_of(record), entry.count);
             // Root first, as flame graphs fold them.
             for (size_t i = record.depth; i-- > 0;) {
                 const DWORD64 pc = frame_pool[record.first_frame + i];
@@ -795,6 +987,19 @@ private:
     std::vector<StackRecord> stacks;
     std::unordered_map<u64, size_t> stack_index;
     std::vector<DWORD64> frame_pool;
+    u64 stall_ns{};
+    u64 stall_ticks{};
+    u32 stall_tick_counter{};
+    NtQuerySystemInformationFn query_system_information{};
+    std::vector<u8> state_buffer;
+    bool states_failed{};
+    bool states_logged{};
+    u64 state_queries{};
+    u64 state_queries_ns{};
+    std::unordered_map<DWORD, u32> thread_index;
+    u64 thread_index_generation{~u64{}};
+    /// thread, stalled, state, wait reason: ticks seen.
+    std::map<std::tuple<u32, bool, u32, u32>, u64> thread_states;
     std::map<std::tuple<u32, u64, u64>, u64> thunk_samples; // thread, top two stack words
     std::map<u64, u64> thunk_rips; // offset into the thunks: samples
     std::unordered_map<DWORD64, std::string> module_names;

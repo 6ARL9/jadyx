@@ -4,6 +4,7 @@
 // SPDX-FileCopyrightText: Copyright 2022 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <chrono>
 #include <tuple>
 #include <utility>
 
@@ -1127,6 +1128,7 @@ Result KServerSession::ReceiveRequest(KernelCore& kernel, uintptr_t server_messa
 
     // Set the request as our current.
     m_current_request = request;
+    m_current_arrival_ns = request->GetArrivalNs();
 
     // Get the client address.
     uint64_t client_message = request->GetAddress();
@@ -1339,6 +1341,10 @@ Result KServerSession::OnRequest(KernelCore& kernel, KSessionRequest* request) {
         const bool was_empty = m_request_list.empty();
 
         // Add the request to the list.
+        request->SetArrivalNs(static_cast<u64>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::steady_clock::now().time_since_epoch())
+                .count()));
         request->Open(kernel);
         m_request_list.push_back(*request);
 

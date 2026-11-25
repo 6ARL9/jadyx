@@ -237,6 +237,8 @@ struct BootConfig {
     bool rom_cache{};
     /// Games on external storage learn their read order and read ahead ("rom_learn=0|1").
     bool rom_learn{true};
+    /// Every read of the game's storage written to the log for offline study ("rom_trace=1").
+    bool rom_trace{};
     /// The cache also reads ahead of in-order reads ("rom_readahead=0|1"; off by default).
     bool rom_readahead{};
     /// Fine per-draw D3D12 CPU timers ("gpu_profile=1"). Off because clock reads are measurable.
@@ -259,6 +261,10 @@ struct BootConfig {
     bool profile{};
     u32 profile_hz{250};      ///< "profile_hz=": samples per second of each running thread.
     u32 profile_window{20};   ///< "profile_window=": seconds per report window.
+    /// "profile_stall_ms=": how late a frame is when every thread is sampled (10-1000).
+    u32 profile_stall_ms{35};
+    /// "profile_stall_stride=": while it is, every thread is sampled once in this many ticks.
+    u32 profile_stall_stride{2};
     /// How idle emulated cores wait for work ("idle_spin=off|adaptive|adaptive:<us>|fixed:<us>").
     Common::SpinPolicy idle_spin{};
     /// Per-game JIT profile, compiled before the guest runs ("jit_prewarm=1", the default),

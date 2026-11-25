@@ -213,6 +213,13 @@ public:
     KProcess* GetServerProcess() const {
         return m_server;
     }
+    /// Steady-clock time the request reached its server session, in ns (Jadyx diagnostics).
+    u64 GetArrivalNs() const {
+        return m_arrival_ns;
+    }
+    void SetArrivalNs(u64 ns) {
+        m_arrival_ns = ns;
+    }
 
     void SetServerProcess(KernelCore& kernel, KProcess* process) {
         m_server = process;
@@ -312,6 +319,7 @@ private:
     KEvent* m_event{};
     uintptr_t m_address{};
     size_t m_size{};
+    u64 m_arrival_ns{};
 };
 
 } // namespace Kernel

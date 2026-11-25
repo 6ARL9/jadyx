@@ -64,6 +64,11 @@ public:
         R_RETURN(this->SendReply(kernel, 0, 0, 0, true, session_closed));
     }
 
+    /// When the request ReceiveRequest last took arrived (steady clock, ns; 0 when unknown).
+    u64 CurrentArrivalNs() const {
+        return m_current_arrival_ns;
+    }
+
     Result ReceiveRequestHLE(KernelCore& kernel, std::shared_ptr<Service::HLERequestContext>* out_context,
                              std::weak_ptr<Service::SessionRequestManager> manager) {
         R_RETURN(this->ReceiveRequest(kernel, 0, 0, 0, out_context, manager));
@@ -80,6 +85,8 @@ private:
     using RequestList = Common::IntrusiveListBaseTraits<KSessionRequest>::ListType;
     RequestList m_request_list{};
     KSessionRequest* m_current_request{};
+    /// When the request being serviced arrived (steady clock, ns), for the file service's wait.
+    u64 m_current_arrival_ns{};
 
     KLightLock m_lock;
 };

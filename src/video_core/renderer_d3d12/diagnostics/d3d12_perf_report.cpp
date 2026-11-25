@@ -12,6 +12,7 @@
 #include <psapi.h>
 
 #include "common/host_stalls.h"
+#include "common/storage_trace.h"
 #include "common/logging.h"
 #include "common/permafrost.h"
 #include "common/thread_cpu_time.h"
@@ -442,6 +443,15 @@ RendererD3D12::HitchProbe::HostTotals RendererD3D12::ReadHostTotals() const {
         .guest_call_us = Common::HostStalls::Read(Counter::GuestCallUs),
         .guest_requests = Common::HostStalls::Read(Counter::GuestRequests),
         .guest_request_us = Common::HostStalls::Read(Counter::GuestRequestUs),
+        .fs_requests = Common::HostStalls::Read(Counter::FsRequests),
+        .fs_queue_us = Common::HostStalls::Read(Counter::FsQueueUs),
+        .fs_handle_us = Common::HostStalls::Read(Counter::FsHandleUs),
+        .fs_reads = Common::HostStalls::Read(Counter::FsReads),
+        .fs_read_bytes = Common::HostStalls::Read(Counter::FsReadBytes),
+        .fs_pace_us = Common::HostStalls::Read(Counter::FsPaceUs),
+        .fs_decrypt_us = Common::HostStalls::Read(Counter::FsDecryptUs),
+        .trim_released = Common::HostStalls::Read(Counter::TrimReleasedBytes),
+        .trim_busy_us = Common::HostStalls::Read(Counter::TrimBusyUs),
     };
 }
 
@@ -474,6 +484,15 @@ RendererD3D12::HitchProbe::HostTotals RendererD3D12::HostDelta(const HitchProbe:
         .guest_call_us = now.guest_call_us - before.guest_call_us,
         .guest_requests = now.guest_requests - before.guest_requests,
         .guest_request_us = now.guest_request_us - before.guest_request_us,
+        .fs_requests = now.fs_requests - before.fs_requests,
+        .fs_queue_us = now.fs_queue_us - before.fs_queue_us,
+        .fs_handle_us = now.fs_handle_us - before.fs_handle_us,
+        .fs_reads = now.fs_reads - before.fs_reads,
+        .fs_read_bytes = now.fs_read_bytes - before.fs_read_bytes,
+        .fs_pace_us = now.fs_pace_us - before.fs_pace_us,
+        .fs_decrypt_us = now.fs_decrypt_us - before.fs_decrypt_us,
+        .trim_released = now.trim_released - before.trim_released,
+        .trim_busy_us = now.trim_busy_us - before.trim_busy_us,
     };
 }
 
@@ -485,6 +504,15 @@ void RendererD3D12::ReportPerf(double interval_ms) {
     const HostTotals host = ReadHostTotals();
     const HostTotals host_delta = HostDelta(host, hitch.host);
     hitch.host = host;
+    // Host trim's total at each present of the last few seconds.
+    constexpr u64 TRIM_LOOKBACK_NS = 2'000'000'000;
+    auto& trim_history = hitch.trim_history;
+    while (!trim_history.empty() && host.time_ns - trim_history.front().first > 2 * TRIM_LOOKBACK_NS) {
+        trim_history.erase(trim_history.begin());
+    }
+    trim_history.emplace_back(host.time_ns, host.trim_released);
+    const u64 longest_fs_queue_us =
+        Common::HostStalls::longest_fs_queue_us.exchange(0, std::memory_order_relaxed);
     // Every frame, so a hitch names only its own submissions.
     const double longest_submit_ms = static_cast<double>(scheduler.TakeLongestSubmitUs()) / 1000.0;
     const double longest_section_ms =
@@ -648,6 +676,30 @@ void RendererD3D12::ReportPerf(double interval_ms) {
                  longest_request & 0xff, longest_request_ms, host_delta.guest_requests,
                  static_cast<double>(host_delta.guest_request_us) / 1000.0);
     }
+    // The file service's side of the frame's reads, and what host trim gave back before it.
+    {
+        const auto to_ms = [](u64 us) { return static_cast<double>(us) / 1000.0; };
+        u64 trim_before = host.trim_released;
+        for (const auto& [time_ns, released] : hitch.trim_history) {
+            if (host.time_ns - time_ns <= TRIM_LOOKBACK_NS) {
+                trim_before = released;
+                break;
+            }
+        }
+        LOG_INFO(Render,
+                 "Hitch storage: file service {} requests, waited for its thread {:.1f} ms "
+                 "(longest {:.1f} ms), handled {:.1f} ms | reads {} ({:.2f} MiB): paced {:.1f} ms, "
+                 "decrypted {:.1f} ms, disk {:.1f} ms | host trim gave back {:.1f} MiB in the frame "
+                 "({:.1f} ms busy), {:.1f} MiB in the 2 s before it",
+                 host_delta.fs_requests, to_ms(host_delta.fs_queue_us), to_ms(longest_fs_queue_us),
+                 to_ms(host_delta.fs_handle_us), host_delta.fs_reads,
+                 static_cast<double>(host_delta.fs_read_bytes) / (1024.0 * 1024.0),
+                 to_ms(host_delta.fs_pace_us), to_ms(host_delta.fs_decrypt_us),
+                 to_ms(host_delta.file_read_us),
+                 static_cast<double>(host_delta.trim_released) / (1024.0 * 1024.0),
+                 to_ms(host_delta.trim_busy_us),
+                 static_cast<double>(host.trim_released - trim_before) / (1024.0 * 1024.0));
+    }
     // What the GPU ran in the frame, to tell heavy work from a submission held up by paging
     // (one long submission with ordinary counts, local memory at its budget).
     const DXGI_QUERY_VIDEO_MEMORY_INFO memory = device.QueryVideoMemory();
@@ -716,6 +768,23 @@ void RendererD3D12::ReportPerfWindow(u32 frames, double total_ms) {
     LOG_INFO(Render, "D3D12 perf over {} frames ({:.0f} ms), mostly {} | {}", frames, total_ms,
              LikelyCause(delta, total_ms), DescribePerf(delta, total_ms));
     LOG_INFO(Render, "D3D12 GPU thread: {}", DescribeDrawCosts(delta, total_ms));
+    {
+        const HitchProbe::HostTotals totals = ReadHostTotals();
+        const HitchProbe::HostTotals d = HostDelta(totals, hitch.window_host);
+        hitch.window_host = totals;
+        const auto to_ms = [](u64 us) { return static_cast<double>(us) / 1000.0; };
+        LOG_INFO(Render,
+                 "Game storage over the window: file service {} requests, waited for its thread "
+                 "{:.1f} ms, handled {:.1f} ms | reads {} ({:.2f} MiB): paced {:.1f} ms, decrypted "
+                 "{:.1f} ms, disk {:.1f} ms ({} disk reads) | guest service requests {} ({:.1f} ms) "
+                 "| host trim gave back {:.1f} MiB ({:.1f} ms busy)",
+                 d.fs_requests, to_ms(d.fs_queue_us), to_ms(d.fs_handle_us), d.fs_reads,
+                 static_cast<double>(d.fs_read_bytes) / (1024.0 * 1024.0), to_ms(d.fs_pace_us),
+                 to_ms(d.fs_decrypt_us), to_ms(d.file_read_us), d.file_reads, d.guest_requests,
+                 to_ms(d.guest_request_us), static_cast<double>(d.trim_released) / (1024.0 * 1024.0),
+                 to_ms(d.trim_busy_us));
+        Common::StorageTrace::Flush();
+    }
     if (const std::string threads = Common::Windows::NamedThreadCpuReport(16); !threads.empty()) {
         LOG_INFO(Render, "Thread CPU over the window (busiest first, name ms@CPU sets): {}",
                  threads);

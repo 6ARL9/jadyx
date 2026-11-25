@@ -366,8 +366,22 @@ private:
             u64 guest_call_us{};
             u64 guest_requests{};
             u64 guest_request_us{};
+            // The file service and host trim (Common::HostStalls).
+            u64 fs_requests{};
+            u64 fs_queue_us{};
+            u64 fs_handle_us{};
+            u64 fs_reads{};
+            u64 fs_read_bytes{};
+            u64 fs_pace_us{};
+            u64 fs_decrypt_us{};
+            u64 trim_released{};
+            u64 trim_busy_us{};
         };
         HostTotals host{};                ///< totals at the previous present
+        HostTotals window_host{};         ///< totals at the previous perf window
+        /// Host trim's released total at recent presents (steady ns, bytes), for what it gave
+        /// back in the seconds before a hitch.
+        std::vector<std::pair<u64, u64>> trim_history;
         double normal_ms{};               ///< moving average of the presented interval
         std::array<double, NUM_TIMED_HITCH_CAUSES> usual_ms{}; ///< moving average of each cause
         double usual_swap_ms{};       ///< moving average of the game's waits for swapped memory

@@ -6,6 +6,7 @@
 
 #include <boost/container/static_vector.hpp>
 #include "common/alignment.h"
+#include "common/host_stalls.h"
 #include "common/swap.h"
 #include "core/file_sys/fssystem/fssystem_aes_ctr_storage.h"
 #include "core/file_sys/fssystem/fssystem_utility.h"
@@ -53,6 +54,7 @@ size_t AesCtrStorage::Read(u8* buffer, size_t size, size_t offset) const {
 
     // Read the data.
     if (m_base_storage->Read(buffer, size, offset) != size) return 0;
+    const Common::HostStalls::ScopedUs decrypt_timer{Common::HostStalls::Counter::FsDecryptUs};
     std::scoped_lock crypto_lock{m_mutex};
 
     // Setup the counter.

@@ -23,6 +23,17 @@ enum class Counter : size_t {
     GuestCallUs,    ///< guest system calls that neither wait nor ask a service
     GuestRequests,  ///< guest requests to a service (SendSyncRequest and its variants)
     GuestRequestUs, ///< from the request to its reply, the wait for the service included
+    // The file service: one host thread answers every file request of the game in turn.
+    FsRequests,     ///< requests the file service answered
+    FsQueueUs,      ///< from a request's arrival to its handler: the thread busy or asleep
+    FsHandleUs,     ///< in the handlers (reads, decryption and the pacing sleep included)
+    FsReads,        ///< storage and file reads among them
+    FsReadBytes,
+    FsPaceUs,       ///< sleeping in the storage read pacing (a cap on the read rate)
+    FsDecryptUs,    ///< decrypting what was read (AES-CTR)
+    // Host trim: emulated DRAM pages found all zero are given back to the OS.
+    TrimReleasedBytes,
+    TrimBusyUs,     ///< the trim thread inside a pass slice
     Count,
 };
 
@@ -68,6 +79,40 @@ inline void RecordGuestCall(u32 number, u64 us, bool request) {
         RaiseLongest(longest_guest_call, number, us);
     }
 }
+
+/// The longest wait of a file request for its handler since the reader last took it, in us.
+inline std::atomic<u64> longest_fs_queue_us{};
+/// On the file service's thread: how long the request being handled waited for it, in us.
+inline thread_local u64 fs_request_queue_us{};
+
+inline void RaiseLongestUs(std::atomic<u64>& longest, u64 us) {
+    u64 previous = longest.load(std::memory_order_relaxed);
+    while (previous < us &&
+           !longest.compare_exchange_weak(previous, us, std::memory_order_relaxed)) {
+    }
+}
+
+/// Microseconds since `start`, for the counters above.
+[[nodiscard]] inline u64 UsSince(std::chrono::steady_clock::time_point start) {
+    return static_cast<u64>(std::chrono::duration_cast<std::chrono::microseconds>(
+                                std::chrono::steady_clock::now() - start)
+                                .count());
+}
+
+/// Adds the time from construction to destruction to a counter.
+class ScopedUs {
+public:
+    explicit ScopedUs(Counter counter_) : counter{counter_} {}
+    ~ScopedUs() {
+        Add(counter, UsSince(start));
+    }
+    ScopedUs(const ScopedUs&) = delete;
+    ScopedUs& operator=(const ScopedUs&) = delete;
+
+private:
+    Counter counter;
+    std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
+};
 
 /// Times one file read; Done passes the bytes it returned.
 class FileReadTimer {

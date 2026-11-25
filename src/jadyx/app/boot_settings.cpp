@@ -10,6 +10,7 @@
 #include <winrt/Windows.ApplicationModel.h>
 #include <winrt/Windows.Storage.h>
 
+#include "common/storage_trace.h"
 #include "common/host_memory.h"
 #include "common/page_table.h"
 #include "common/logging.h"
@@ -329,6 +330,7 @@ void ApplyBootConfig(const BootConfig& config, const BootSurface& surface, bool 
     SetRomReadCache(config.rom_cache);
     SetRomReadAhead(config.rom_readahead);
     SetRomLearn(config.rom_learn);
+    Common::StorageTrace::SetEnabled(config.rom_trace);
     Tegra::Texture::SetParallelUnswizzle(config.parallel_unswizzle);
     D3D12::SetTextureMemoryCap(u64{config.texture_cap_mib} << 20);
     D3D12::SetTextureMemoryLine(
