@@ -601,6 +601,8 @@ void GameSession::StartGuest() {
                                          .window_seconds = config.profile_window,
                                          .stall_ms = config.profile_stall_ms,
                                          .stall_stride = config.profile_stall_stride,
+                                         .threads = config.profile_threads,
+                                         .stall_only = config.profile_stall_only,
                                          .output = output});
         WriteDiag("step: sampling profiler on, " + std::to_string(config.profile_hz) +
                   " Hz, " + std::to_string(config.profile_window) + " s windows, all threads " +

@@ -89,6 +89,8 @@ u64 window_counter{};
 /// Blocks with their bytes in the file: enough to read what the hottest code does.
 constexpr size_t GUEST_CODE_BLOCKS = 64;
 constexpr size_t GUEST_CODE_BYTES = 512;
+/// Host code bytes written for each of those blocks (stall-only profiles).
+constexpr size_t HOST_CODE_BYTES = 4096;
 
 struct JitBlock {
     u64 host;
@@ -157,6 +159,16 @@ bool VirtualUnwindGuarded(DWORD64 image_base, DWORD64 pc, PRUNTIME_FUNCTION func
         DWORD64 establisher_frame{};
         RtlVirtualUnwind(UNW_FLAG_NHANDLER, image_base, pc, function, context, &handler_data,
                          &establisher_frame, nullptr);
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+/// Copies memory that may have gone away (JIT code of a cleared cache); false if it faults.
+bool CopyGuarded(void* destination, const void* source, size_t size) {
+    __try {
+        std::memcpy(destination, source, size);
         return true;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         return false;
@@ -299,8 +311,10 @@ public:
         if (std::FILE* file = OpenOutput(output_started ? L"a" : L"w")) {
             output_started = true;
             std::fputs("# jadyx sampling profile v1\n", file);
-            std::fputs(fmt::format("stall_ms {} stall_stride {}\n", options.stall_ms,
-                                   options.stall_stride)
+            std::fputs(fmt::format("stall_ms {} stall_stride {} stall_only {} threads {}\n",
+                                   options.stall_ms, options.stall_stride,
+                                   options.stall_only ? 1 : 0,
+                                   options.threads.empty() ? "all" : options.threads)
                            .c_str(),
                        file);
             WriteModuleIdentity(file);
@@ -400,16 +414,36 @@ private:
             return;
         }
         seen_generation = registry_generation;
-        for (size_t index = threads.size(); index < registry.size(); ++index) {
+        for (size_t index = seen_registry_size; index < registry.size(); ++index) {
             ThreadEntry& entry = *registry[index];
             entry.capture_backoff = {};
             entry.window_cpu_start = CpuTime100ns(entry.handle);
             QueryThreadCycleTime(entry.handle, &entry.last_cycles);
         }
+        seen_registry_size = registry.size();
         threads.clear();
         for (const auto& entry : registry) {
-            threads.push_back(entry.get());
+            if (Wanted(entry->name)) {
+                threads.push_back(entry.get());
+            }
         }
+    }
+
+    /// Whether Options::threads lets a thread of this name be sampled.
+    bool Wanted(const std::string& name) const {
+        if (options.threads.empty()) {
+            return true;
+        }
+        size_t start = 0;
+        while (start <= options.threads.size()) {
+            const size_t end = std::min(options.threads.find(',', start), options.threads.size());
+            const std::string_view prefix{options.threads.data() + start, end - start};
+            if (!prefix.empty() && std::string_view{name}.starts_with(prefix)) {
+                return true;
+            }
+            start = end + 1;
+        }
+        return false;
     }
 
     void StartWindow() {
@@ -471,6 +505,15 @@ private:
             return;
         }
         stall_tick_counter = 0;
+        if (options.stall_only) {
+            // Keep "ran since the previous tick" right for the first stalled tick.
+            for (ThreadEntry* entry : threads) {
+                if (!entry->dead) {
+                    QueryThreadCycleTime(entry->handle, &entry->last_cycles);
+                }
+            }
+            return;
+        }
         if (window_ticks % STATE_STRIDE == 0) {
             CountThreadStates(false);
         }
@@ -867,7 +910,8 @@ private:
         };
         std::map<std::pair<u32, u64>, Hits> hits;
         for (const StackRecord& record : stacks) {
-            if (record.waiting || record.stalled) {
+            // Stall-only profiles have stalled samples only: those that ran count.
+            if (record.waiting || (record.stalled && !options.stall_only)) {
                 continue;
             }
             for (size_t i = 0; i < record.depth; ++i) {
@@ -965,6 +1009,38 @@ private:
             line += '\n';
             std::fputs(line.c_str(), file);
         }
+        // What the JIT made of them: the newest block compiled for each of those guest pcs.
+        if (!options.stall_only) {
+            return;
+        }
+        std::unordered_map<u64, JitBlock> newest;
+        {
+            std::scoped_lock blocks_lock{jit_blocks_mutex};
+            for (const JitBlock& block : jit_blocks) {
+                newest[block.guest_pc] = block;
+            }
+        }
+        std::vector<u8> host_bytes;
+        for (const auto& [samples, pc] : hottest) {
+            const auto found = newest.find(pc);
+            if (found == newest.end()) {
+                continue;
+            }
+            const JitBlock& block = found->second;
+            host_bytes.resize(std::min<u64>(block.host_size, HOST_CODE_BYTES));
+            if (host_bytes.empty() ||
+                !CopyGuarded(host_bytes.data(), reinterpret_cast<const void*>(block.host),
+                             host_bytes.size())) {
+                continue;
+            }
+            std::string line = fmt::format("hostcode 0x{:x} 0x{:x} {} ", pc, block.host,
+                                           block.host_size);
+            for (const u8 byte : host_bytes) {
+                fmt::format_to(std::back_inserter(line), "{:02x}", byte);
+            }
+            line += '\n';
+            std::fputs(line.c_str(), file);
+        }
     }
 
     Options options;
@@ -980,6 +1056,7 @@ private:
     u8* stack_copy{};
     std::vector<ThreadEntry*> threads;
     u64 seen_generation{~u64{}};
+    size_t seen_registry_size{};
 
     std::chrono::steady_clock::time_point window_start;
     u64 window_ticks{};

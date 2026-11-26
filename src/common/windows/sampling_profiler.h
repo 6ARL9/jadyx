@@ -38,6 +38,10 @@ struct Options {
     u32 stall_ms{120};
     /// While a frame is that late, every thread is sampled once in this many ticks.
     u32 stall_stride{8};
+    /// Only threads whose name starts with one of these (comma separated); empty: all.
+    std::string threads;
+    /// Sample only while a frame is late: nothing at all in between.
+    bool stall_only{};
     /// File the windows are appended to; truncated by Start.
     std::filesystem::path output;
 };

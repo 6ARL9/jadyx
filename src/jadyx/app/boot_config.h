@@ -270,6 +270,10 @@ struct BootConfig {
     u32 profile_stall_ms{35};
     /// "profile_stall_stride=": while it is, every thread is sampled once in this many ticks.
     u32 profile_stall_stride{2};
+    /// "profile_threads=": only threads whose name starts with one of these (comma separated).
+    std::string profile_threads;
+    /// "profile_stall_only=1": sample only while a frame is late.
+    bool profile_stall_only{};
     /// How idle emulated cores wait for work ("idle_spin=off|adaptive|adaptive:<us>|fixed:<us>").
     Common::SpinPolicy idle_spin{};
     /// Per-game JIT profile, compiled before the guest runs ("jit_prewarm=1", the default),

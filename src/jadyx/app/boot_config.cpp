@@ -483,6 +483,17 @@ void ParseBootConfigFile(const std::string& install_path, BootConfig& config) {
                           (config.rom_learn ? "on" : "off"));
                 continue;
             }
+            if (line.starts_with("profile_threads=")) {
+                config.profile_threads = line.substr(line.find('=') + 1);
+                WriteDiag("boot.cfg: profiler threads " + config.profile_threads);
+                continue;
+            }
+            if (line == "profile_stall_only=0" || line == "profile_stall_only=1") {
+                config.profile_stall_only = line.back() == '1';
+                WriteDiag(std::string{"boot.cfg: profiler only while a frame is late "} +
+                          (config.profile_stall_only ? "on" : "off"));
+                continue;
+            }
             if (line.starts_with("profile_stall_ms=") ||
                 line.starts_with("profile_stall_stride=")) {
                 const bool stall_ms = line.starts_with("profile_stall_ms=");
