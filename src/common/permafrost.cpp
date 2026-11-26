@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include "common/permafrost.h"
+#include "common/dynamic_library.h"
 
 #ifdef _WIN32
 
@@ -1556,8 +1557,18 @@ std::string ThreadName(DWORD id) {
         if (thread.id.load(std::memory_order_relaxed) != id) {
             continue;
         }
+        // Looked up at run time, as in host_memory.cpp: not every SDK declares it for apps.
+        using GetThreadDescriptionFn = HRESULT(WINAPI*)(HANDLE, PWSTR*);
+        static const Common::DynamicLibrary kernelbase("Kernelbase");
+        static const GetThreadDescriptionFn describe = [] {
+            GetThreadDescriptionFn function{};
+            if (kernelbase.IsOpen()) {
+                (void)kernelbase.GetSymbol("GetThreadDescription", &function);
+            }
+            return function;
+        }();
         PWSTR wide = nullptr;
-        if (FAILED(GetThreadDescription(thread.handle, &wide)) || wide == nullptr) {
+        if (describe == nullptr || FAILED(describe(thread.handle, &wide)) || wide == nullptr) {
             return {};
         }
         char name[64]{};
