@@ -425,8 +425,14 @@ ComPtr<ID3D12Resource> BufferCacheRuntime::CreateDefaultBuffer(u64 size) {
     using VideoCore::Perf::Counter;
     const auto create_begin = std::chrono::steady_clock::now();
     // A range of a heap made earlier: committing each buffer took about 0.3 ms, 100 to 170 of
-    // them in one frame at Metroid Prime Remastered's room transitions.
-    if (ComPtr<ID3D12Resource> placed = buffer_heaps.Create(size)) {
+    // them in one frame at Metroid Prime Remastered's room transitions. The committed fallback
+    // counts its own faults (CreateCommittedBuffer).
+    ComPtr<ID3D12Resource> placed;
+    {
+        const VideoCore::Perf::ScopedFaults create_faults{Counter::ResourceCreateFaults};
+        placed = buffer_heaps.Create(size);
+    }
+    if (placed) {
         const u64 elapsed = VideoCore::Perf::ElapsedUs(create_begin);
         VideoCore::Perf::Add(Counter::ResourceCreateUs, elapsed);
         VideoCore::Perf::Add(Counter::ResourcesCreated, 1);

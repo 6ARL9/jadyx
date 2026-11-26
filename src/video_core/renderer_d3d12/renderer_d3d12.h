@@ -355,6 +355,12 @@ private:
             u64 file_read_bytes{};
             u64 file_read_us{};
             u64 page_faults{};
+            // The process's working set and private commit now (bytes), and their change over
+            // a delta: faults that grew the working set touched memory for the first time.
+            u64 working_set{};
+            u64 private_bytes{};
+            s64 working_set_change{};
+            s64 private_change{};
             // What the game's side did (Common::HostStalls, Common::Permafrost).
             u64 time_ns{};
             u64 tsc{};

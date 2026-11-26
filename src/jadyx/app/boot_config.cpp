@@ -545,6 +545,18 @@ void ParseBootConfigFile(const std::string& install_path, BootConfig& config) {
                           (config.readback_keep ? "on" : "off"));
                 continue;
             }
+            if (line.starts_with("readback_prewarm=")) {
+                const unsigned long parsed =
+                    std::strtoul(line.substr(line.find('=') + 1).c_str(), nullptr, 10);
+                if (parsed <= 64) {
+                    config.readback_prewarm = static_cast<u32>(parsed);
+                    WriteDiag("boot.cfg: " + std::to_string(parsed) +
+                              " readback buffers of 64 and of 128 KiB made at start");
+                } else {
+                    WriteDiag("boot.cfg: invalid " + line + " (0-64), ignored");
+                }
+                continue;
+            }
             if (line.starts_with("profile_threads=")) {
                 config.profile_threads = line.substr(line.find('=') + 1);
                 WriteDiag("boot.cfg: profiler threads " + config.profile_threads);

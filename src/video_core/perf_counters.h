@@ -272,6 +272,9 @@ enum class Counter : size_t {
     TextureUploadConvertFaults,  ///< decoding / re-encoding (time in TextureDecodeUs)
     TextureUploadStagingFaults,  ///< getting the staging buffer
     TextureUploadBackendFaults,  ///< the backend's upload (copies, in-place writes)
+    ResourceCreateFaults,        ///< page faults while creating resources (detailed profile)
+    CacheGcFaults,               ///< and while the caches collected garbage
+    BufferUploadFaults,          ///< and while guest buffers were copied to staging
     // What the resources counted in ResourcesCreated were (always counted).
     BufferCacheCreates,    ///< guest buffers given a new host buffer (not a recycled one)
     BufferCacheCreateUs,
@@ -528,6 +531,31 @@ public:
 private:
     bool enabled{};
     u64 last{};
+};
+
+/// Adds the process page faults taken during the scope to a counter (detailed profile only; they
+/// are the whole process's, other threads' included).
+class ScopedFaults {
+public:
+    explicit ScopedFaults(Counter counter_)
+        : counter{counter_}, enabled{DetailedGpuProfileEnabled()} {
+        if (enabled) {
+            start = ProcessPageFaults();
+        }
+    }
+    ~ScopedFaults() {
+        if (enabled) {
+            Add(counter, ProcessPageFaults() - start);
+        }
+    }
+
+    ScopedFaults(const ScopedFaults&) = delete;
+    ScopedFaults& operator=(const ScopedFaults&) = delete;
+
+private:
+    Counter counter;
+    bool enabled{};
+    u64 start{};
 };
 
 /// Adds the scope's duration to a nanosecond counter.

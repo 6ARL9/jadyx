@@ -414,9 +414,10 @@ RendererD3D12::HitchProbe::HostTotals RendererD3D12::ReadHostTotals() const {
     using Dynarmic::JitProfile::Phase;
     using Common::HostStalls::Counter;
     const auto compile = Dynarmic::JitProfile::Read(Phase::Compile);
-    PROCESS_MEMORY_COUNTERS memory{};
+    PROCESS_MEMORY_COUNTERS_EX memory{};
     memory.cb = sizeof(memory);
-    const bool have_memory = K32GetProcessMemoryInfo(GetCurrentProcess(), &memory, sizeof(memory));
+    const bool have_memory = K32GetProcessMemoryInfo(
+        GetCurrentProcess(), reinterpret_cast<PROCESS_MEMORY_COUNTERS*>(&memory), sizeof(memory));
     const Common::Permafrost::Stats swap = Common::Permafrost::GetStats();
     std::array<u64, 4> core_idle_us{};
     std::array<u64, 4> core_cycles{};
@@ -434,6 +435,8 @@ RendererD3D12::HitchProbe::HostTotals RendererD3D12::ReadHostTotals() const {
         .file_read_bytes = Common::HostStalls::Read(Counter::FileReadBytes),
         .file_read_us = Common::HostStalls::Read(Counter::FileReadUs),
         .page_faults = have_memory ? memory.PageFaultCount : hitch.host.page_faults,
+        .working_set = have_memory ? memory.WorkingSetSize : hitch.host.working_set,
+        .private_bytes = have_memory ? memory.PrivateUsage : hitch.host.private_bytes,
         .time_ns = static_cast<u64>(std::chrono::duration_cast<std::chrono::nanoseconds>(
                                         std::chrono::steady_clock::now().time_since_epoch())
                                         .count()),
@@ -481,6 +484,12 @@ RendererD3D12::HitchProbe::HostTotals RendererD3D12::HostDelta(const HitchProbe:
         .file_read_bytes = now.file_read_bytes - before.file_read_bytes,
         .file_read_us = now.file_read_us - before.file_read_us,
         .page_faults = now.page_faults - before.page_faults,
+        .working_set = now.working_set,
+        .private_bytes = now.private_bytes,
+        .working_set_change =
+            static_cast<s64>(now.working_set) - static_cast<s64>(before.working_set),
+        .private_change =
+            static_cast<s64>(now.private_bytes) - static_cast<s64>(before.private_bytes),
         .time_ns = now.time_ns - before.time_ns,
         .tsc = now.tsc - before.tsc,
         .core_idle_us = core_idle_us,
@@ -638,20 +647,26 @@ void RendererD3D12::ReportPerf(double interval_ms) {
     LOG_INFO(Render,
              "Hitch: {:.0f} ms frame, normally {:.0f} ms; likely {} | JIT {:.1f} ms ({} blocks, "
              "{} code invalidations), file reads {:.1f} ms ({}, {:.2f} MiB), cache GC {:.1f} ms "
-             "({}), page faults {} | GPU thread: idle {:.1f} ms, fence waits {:.1f} ms, pipeline "
-             "stalls {:.1f} ms ({}), guest readbacks {:.1f} ms ({}), new resources {:.1f} ms ({}), "
-             "CPU texture decode {:.1f} ms | game queued {} frames, GPU busy {:.1f} ms | new: "
+             "({}, {} faults), page faults {} (working set {:+.1f} MiB, commit {:+.1f} MiB; buffer "
+             "uploads {} faults) | GPU thread: idle {:.1f} ms, fence waits {:.1f} ms, "
+             "pipeline stalls {:.1f} ms ({}), guest readbacks {:.1f} ms ({}), new resources "
+             "{:.1f} ms ({}, {} faults), CPU texture decode {:.1f} ms | game queued {} frames, GPU busy {:.1f} ms | new: "
              "cached buffers {} ({:.1f} ms, {} placed, {} buffer heaps made), images {} "
              "({:.1f} ms)",
              interval_ms, normal, HitchCauseName(static_cast<size_t>(cause)),
              at(HitchCause::JitCompile), host_delta.jit_compiles, host_delta.jit_invalidations,
              at(HitchCause::FileReads), host_delta.file_reads,
              static_cast<double>(host_delta.file_read_bytes) / (1024.0 * 1024.0),
-             at(HitchCause::CacheGc), get(Counter::CacheGcRuns), host_delta.page_faults,
+             at(HitchCause::CacheGc), get(Counter::CacheGcRuns), get(Counter::CacheGcFaults),
+             host_delta.page_faults,
+             static_cast<double>(host_delta.working_set_change) / (1024.0 * 1024.0),
+             static_cast<double>(host_delta.private_change) / (1024.0 * 1024.0),
+             get(Counter::BufferUploadFaults),
              at(HitchCause::GameCpu), at(HitchCause::Gpu), at(HitchCause::Pipelines),
              get(Counter::PipelineStalls), at(HitchCause::GuestReadback),
              get(Counter::GpuThreadFlushes), at(HitchCause::NewResources),
-             get(Counter::ResourcesCreated), at(HitchCause::TextureDecode),
+             get(Counter::ResourcesCreated), get(Counter::ResourceCreateFaults),
+             at(HitchCause::TextureDecode),
              get(Counter::GuestFramesQueued), Ms(delta, Counter::GpuBusyUs),
              get(Counter::BufferCacheCreates), Ms(delta, Counter::BufferCacheCreateUs),
              get(Counter::BufferCachePlaced), get(Counter::BufferHeapsGrown),
@@ -805,6 +820,21 @@ void RendererD3D12::ReportPerfWindow(u32 frames, double total_ms) {
                  static_cast<double>(d.swap_read_bytes) / (1024.0 * 1024.0), d.swap_fill_pauses,
                  to_ms(d.swap_fill_pause_us), to_ms(d.swap_stall_us), d.guest_commits,
                  static_cast<double>(d.guest_commit_bytes) / (1024.0 * 1024.0));
+        // Where the process's page faults came from (the parts only with gpu_profile=1). Each
+        // part counts every thread's faults while that work ran, so the parts can overlap.
+        const auto get = [&delta](Counter counter) { return VideoCore::Perf::Get(delta, counter); };
+        const u64 texture_faults =
+            get(Counter::TextureUploadReadFaults) + get(Counter::TextureUploadUnswizzleFaults) +
+            get(Counter::TextureUploadPreserveFaults) + get(Counter::TextureUploadConvertFaults) +
+            get(Counter::TextureUploadStagingFaults) + get(Counter::TextureUploadBackendFaults);
+        const auto mib = [](auto bytes) { return static_cast<double>(bytes) / (1024.0 * 1024.0); };
+        LOG_INFO(Render,
+                 "Page faults over the window: {} | while creating resources {}, cache GC {}, "
+                 "texture uploads {}, buffer uploads {} | working set {:.0f} MiB ({:+.1f}), "
+                 "private commit {:.0f} MiB ({:+.1f})",
+                 d.page_faults, get(Counter::ResourceCreateFaults), get(Counter::CacheGcFaults),
+                 texture_faults, get(Counter::BufferUploadFaults), mib(d.working_set),
+                 mib(d.working_set_change), mib(d.private_bytes), mib(d.private_change));
         Common::StorageTrace::Flush();
     }
     if (const std::string threads = Common::Windows::NamedThreadCpuReport(16); !threads.empty()) {

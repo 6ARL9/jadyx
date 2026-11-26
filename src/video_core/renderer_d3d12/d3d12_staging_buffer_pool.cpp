@@ -54,6 +54,11 @@ std::atomic<bool> keep_large_staging{true};
 std::atomic<bool> keep_small_readbacks{false};
 constexpr size_t SMALL_READBACK_LEVEL = 17; // 128 KiB
 constexpr u64 SMALL_READBACK_MAX_BYTES = 32_MiB;
+/// SetPrewarmReadbacks, read when a pool is created.
+std::atomic<u32> prewarm_readbacks{0};
+/// The bucket every readback of 64 KiB and less shares with prewarming: all of them get a
+/// 64 KiB buffer (DedicatedStagingSize), so any free one fits.
+constexpr u32 SHARED_SMALL_READBACK_LEVEL = 16;
 
 std::atomic<bool> cached_staging{false};
 std::atomic<u64> cached_buffers{0};
@@ -73,6 +78,8 @@ ComPtr<ID3D12Resource> CreateCachedUpload(ID3D12Device* device, u64 size,
     {
         VideoCore::Perf::ScopedTimer timer{VideoCore::Perf::Counter::ResourceCreateUs,
                                            VideoCore::Perf::Counter::ResourcesCreated};
+        const VideoCore::Perf::ScopedFaults create_faults{
+            VideoCore::Perf::Counter::ResourceCreateFaults};
         // The CPU writes every staged byte before the GPU reads it.
         const D3D12_HEAP_FLAGS heap_flags = NotZeroedFlag(device);
         const auto create_begin = std::chrono::steady_clock::now();
@@ -123,6 +130,10 @@ void SetKeepLargeStaging(bool enabled) {
 
 void SetKeepSmallReadbacks(bool enabled) {
     keep_small_readbacks.store(enabled, std::memory_order_relaxed);
+}
+
+void SetPrewarmReadbacks(u32 count) {
+    prewarm_readbacks.store((std::min)(count, 64U), std::memory_order_relaxed);
 }
 
 void SetCachedStaging(bool enabled) {
@@ -181,6 +192,47 @@ StagingBufferPool::StagingBufferPool(const Device& device_, Scheduler& scheduler
     LOG_INFO(Render, "D3D12: staging stream ready ({} MiB, {} regions of {} MiB, {})",
              stream_buffer_size / bytes_per_mib, NUM_SYNCS, region_size / bytes_per_mib,
              GetCachedStagingStats().buffers != 0 ? "CPU-cached memory" : "upload heap");
+    shares_small_readbacks = prewarm_readbacks.load(std::memory_order_relaxed) != 0;
+    PrewarmReadbacks(prewarm_readbacks.load(std::memory_order_relaxed));
+}
+
+u32 StagingBufferPool::BucketOf(size_t size, MemoryUsage usage) const {
+    const u32 log2 = static_cast<u32>(Common::Log2Ceil<u64>(size));
+    if (shares_small_readbacks && usage == MemoryUsage::Download &&
+        log2 < SHARED_SMALL_READBACK_LEVEL) {
+        return SHARED_SMALL_READBACK_LEVEL;
+    }
+    return log2;
+}
+
+void StagingBufferPool::PrewarmReadbacks(u32 count) {
+    if (count == 0) {
+        return;
+    }
+    // Made before the game draws, where waiting on the system costs nothing visible. Free right
+    // away (tick 0): nothing has used them. Kept with the small readbacks (SetKeepSmallReadbacks).
+    const auto begin = std::chrono::steady_clock::now();
+    u32 made = 0;
+    for (const size_t size : {size_t{64} * 1024, size_t{128} * 1024}) {
+        for (u32 i = 0; i < count; ++i) {
+            try {
+                StagingBufferRef ref = CreateStagingBuffer(size, MemoryUsage::Download, false);
+                for (StagingBuffer& entry : download_cache[BucketOf(size, MemoryUsage::Download)].entries) {
+                    if (entry.index == ref.index) {
+                        entry.tick = 0;
+                    }
+                }
+                ++made;
+            } catch (const std::exception& e) {
+                LOG_WARNING(Render, "D3D12: prewarming readback buffers stopped: {}", e.what());
+                return;
+            }
+        }
+    }
+    LOG_INFO(Render, "D3D12: prewarmed {} readback buffers of 64 and 128 KiB in {} ms", made,
+             std::chrono::duration_cast<std::chrono::milliseconds>(
+                 std::chrono::steady_clock::now() - begin)
+                 .count());
 }
 
 StagingBufferPool::~StagingBufferPool() = default;
@@ -384,7 +436,7 @@ StagingBufferRef StagingBufferPool::GetStagingBuffer(size_t size, MemoryUsage us
 std::optional<StagingBufferRef> StagingBufferPool::TryGetReservedBuffer(size_t size,
                                                                         MemoryUsage usage,
                                                                         bool deferred) {
-    const u32 log2 = static_cast<u32>(Common::Log2Ceil<u64>(size));
+    const u32 log2 = BucketOf(size, usage);
     if (log2 >= NUM_LEVELS) {
         throw std::length_error("D3D12: staging request is too large");
     }
@@ -410,7 +462,7 @@ std::optional<StagingBufferRef> StagingBufferPool::TryGetReservedBuffer(size_t s
 
 StagingBufferRef StagingBufferPool::CreateStagingBuffer(size_t size, MemoryUsage usage,
                                                         bool deferred) {
-    const u32 log2 = static_cast<u32>(Common::Log2Ceil<u64>(size));
+    const u32 log2 = BucketOf(size, usage);
     if (log2 >= NUM_LEVELS) {
         throw std::length_error("D3D12: staging request is too large");
     }

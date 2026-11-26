@@ -285,6 +285,9 @@ struct BootConfig {
     /// "readback_keep=1": small readback buffers (128 KiB and less) stay for the session instead
     /// of going back and being made again (D3D12::SetKeepSmallReadbacks).
     bool readback_keep{};
+    /// "readback_prewarm=N" (0-64): N readback buffers of 64 KiB and N of 128 KiB made before the
+    /// game draws, readbacks of 64 KiB and less sharing them (D3D12::SetPrewarmReadbacks).
+    u32 readback_prewarm{};
     /// How idle emulated cores wait for work ("idle_spin=off|adaptive|adaptive:<us>|fixed:<us>").
     Common::SpinPolicy idle_spin{};
     /// Per-game JIT profile, compiled before the guest runs ("jit_prewarm=1", the default),

@@ -161,6 +161,7 @@ template <class P>
 void TextureCache<P>::RunGarbageCollector() {
     const VideoCore::Perf::ScopedTimer gc_timer{VideoCore::Perf::Counter::CacheGcUs,
                                                 VideoCore::Perf::Counter::CacheGcRuns};
+    const VideoCore::Perf::ScopedFaults gc_faults{VideoCore::Perf::Counter::CacheGcFaults};
     const VideoCore::FrameTrace::ScopedSpan trace_gc{
         VideoCore::FrameTrace::Event::TextureGcLong, frame_tick};
     VideoCore::FrameTrace::Mark(VideoCore::FrameTrace::Event::TextureGcPressure,

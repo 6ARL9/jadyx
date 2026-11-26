@@ -74,6 +74,8 @@ ComPtr<ID3D12Resource> TransferBufferPool::Acquire(u64 size, bool unordered_acce
     {
         // A range of a heap made ahead: committing one waited on the system now and then (528 ms
         // for 64 KiB mid-game). Placed buffers allow unordered access: both kinds fit.
+        const VideoCore::Perf::ScopedFaults create_faults{
+            VideoCore::Perf::Counter::ResourceCreateFaults};
         const auto create_begin = std::chrono::steady_clock::now();
         if (ComPtr<ID3D12Resource> placed = heaps.Create(size)) {
             VideoCore::Perf::Add(VideoCore::Perf::Counter::ResourceCreateUs,

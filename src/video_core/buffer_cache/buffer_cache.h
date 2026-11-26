@@ -65,6 +65,7 @@ template <class P>
 void BufferCache<P>::RunGarbageCollector() {
     const VideoCore::Perf::ScopedTimer gc_timer{VideoCore::Perf::Counter::CacheGcUs,
                                                 VideoCore::Perf::Counter::CacheGcRuns};
+    const VideoCore::Perf::ScopedFaults gc_faults{VideoCore::Perf::Counter::CacheGcFaults};
     const bool aggressive_gc = total_used_memory >= critical_memory;
     const u64 ticks_to_destroy = aggressive_gc ? 60 : 120;
     int num_iterations = aggressive_gc ? 64 : 32;
@@ -2308,6 +2309,8 @@ bool BufferCache<P>::SynchronizeBuffer(Buffer& buffer, DAddr device_addr, u32 si
 template <class P>
 void BufferCache<P>::UploadMemory(Buffer& buffer, u64 total_size_bytes, u64 largest_copy,
                                   std::span<BufferCopy> copies) {
+    const VideoCore::Perf::ScopedFaults upload_faults{
+        VideoCore::Perf::Counter::BufferUploadFaults};
     if constexpr (USE_MEMORY_MAPS_FOR_UPLOADS) {
         MappedUploadMemory(buffer, total_size_bytes, copies);
     } else {

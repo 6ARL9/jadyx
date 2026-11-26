@@ -62,6 +62,8 @@ ComPtr<ID3D12Resource> CreateCommittedBuffer(ID3D12Device* device, u64 size,
     ComPtr<ID3D12Resource> buffer;
     VideoCore::Perf::ScopedTimer timer{VideoCore::Perf::Counter::ResourceCreateUs,
                                        VideoCore::Perf::Counter::ResourcesCreated};
+    const VideoCore::Perf::ScopedFaults create_faults{
+        VideoCore::Perf::Counter::ResourceCreateFaults};
     // A sudden jump in commit otherwise has no owner in the log.
     if (size >= 128ULL * 1024 * 1024) {
         LOG_WARNING(Render, "D3D12: large buffer: {} MiB, {}", size / (1024 * 1024), what);

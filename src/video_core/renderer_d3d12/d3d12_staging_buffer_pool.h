@@ -139,6 +139,9 @@ private:
     void MeasureHeadroom();
     /// SetKeepSmallReadbacks: a level of small readbacks that releases skip.
     [[nodiscard]] bool KeepsSmallReadbacks(const StagingBuffersCache& cache, size_t log2) const;
+    /// The bucket a request goes to (SetPrewarmReadbacks shares one for small readbacks).
+    [[nodiscard]] u32 BucketOf(size_t size, MemoryUsage usage) const;
+    void PrewarmReadbacks(u32 count);
 
     size_t Region(size_t iter) const noexcept {
         return iter / region_size;
@@ -163,6 +166,8 @@ private:
     unsigned guard_trim_cursor{};
     /// A memory emergency or a refused allocation is being handled: nothing is kept.
     bool releasing_everything{};
+    /// SetPrewarmReadbacks was on when the pool was made (BucketOf).
+    bool shares_small_readbacks{};
 
     StagingBuffersCache upload_cache;
     StagingBuffersCache download_cache;
@@ -193,6 +198,11 @@ void SetKeepLargeStaging(bool enabled);
 /// instead of releasing them and making them again ("readback_keep=1"). Only a memory emergency
 /// or a refused allocation still releases them.
 void SetKeepSmallReadbacks(bool enabled);
+/// Readback buffers made when the pool is created, `count` of 64 KiB and `count` of 128 KiB
+/// ("readback_prewarm=N", 0-64), and readbacks of 64 KiB and less sharing one bucket. Creating
+/// one mid-game waited on the system for 460 ms (Metroid Prime Remastered, 0.4.4.16 and
+/// 0.4.4.21); a session made 28 of these sizes in its first minutes, then reused them.
+void SetPrewarmReadbacks(u32 count);
 [[nodiscard]] bool CachedStaging() noexcept;
 
 struct CachedStagingStats {
