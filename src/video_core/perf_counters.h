@@ -286,6 +286,8 @@ enum class Counter : size_t {
     CpuWritableUploadBytes,
     GpuSections,            ///< streamed volume copies timed on the GPU (Scheduler::BeginSection)
     GpuSectionUs,
+    AstcGpuSections,        ///< ASTC images decoded (and re-encoded) on the GPU, timed there
+    AstcGpuSectionUs,
     Count,
 };
 

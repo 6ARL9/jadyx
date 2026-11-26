@@ -95,6 +95,18 @@ void TextureCacheRuntime::AccelerateImageUpload(
     VideoCore::Perf::Add(VideoCore::Perf::Counter::TextureUploads, 1);
     VideoCore::Perf::Add(VideoCore::Perf::Counter::TextureUploadBytes, image.guest_size_bytes);
     VideoCore::Perf::Add(VideoCore::Perf::Counter::TextureGpuDecodes, 1);
+    // The GPU time of the decode and its re-encoding: loading frames ran 140-320 ms on the GPU
+    // with 77-89 of these in them.
+    struct AstcSection {
+        Scheduler& scheduler;
+        bool open;
+        ~AstcSection() {
+            if (open) {
+                scheduler.EndSection();
+            }
+        }
+    } const astc_section{scheduler, VideoCore::Perf::DetailedGpuProfileEnabled() &&
+                                        scheduler.BeginSection(Scheduler::SectionKind::AstcDecode)};
     if (!logged_gpu_astc) {
         LOG_INFO(Render, "D3D12: first ASTC image decoded on the GPU ({} {}x{}, {} layers, {} "
                  "levels)", image.info.format, image.info.size.width, image.info.size.height,

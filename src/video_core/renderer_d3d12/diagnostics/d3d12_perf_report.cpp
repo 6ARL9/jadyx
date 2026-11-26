@@ -113,7 +113,7 @@ std::string DescribePerf(const VideoCore::Perf::Snapshot& d, double interval_ms)
         "guest flushes {} ({:.1f} ms), new resources {} ({:.1f} ms; cached buffers {}, {} placed; "
         "images {}), CPU texture decode {:.1f} ms, "
         "residual estimate {:.1f} ms (scopes may overlap) | GPU busy {:.1f} ms, {} submits | {} draws, {} dispatches | "
-        "uploads {} ({:.2f} MiB, {} GPU-decoded), downloads {} ({:.2f} MiB) | staging: {} "
+        "uploads {} ({:.2f} MiB, {} GPU-decoded; ASTC timed {}, {:.1f} ms GPU), downloads {} ({:.2f} MiB) | staging: {} "
         "dedicated ({:.2f} MiB), {} ring waits | texture replays {} ({} mismatched)",
         idle, get(Counter::FenceWaits), fence, get(Counter::PipelineStalls), pipelines,
         get(Counter::GpuThreadFlushes), flushes, get(Counter::ResourcesCreated), creates,
@@ -122,7 +122,8 @@ std::string DescribePerf(const VideoCore::Perf::Snapshot& d, double interval_ms)
         Ms(d, Counter::GpuBusyUs), get(Counter::Submits), get(Counter::Draws),
         get(Counter::Dispatches), get(Counter::TextureUploads),
         static_cast<double>(get(Counter::TextureUploadBytes)) / (1024.0 * 1024.0),
-        get(Counter::TextureGpuDecodes), get(Counter::TextureDownloads),
+        get(Counter::TextureGpuDecodes), get(Counter::AstcGpuSections),
+        Ms(d, Counter::AstcGpuSectionUs), get(Counter::TextureDownloads),
         static_cast<double>(get(Counter::TextureDownloadBytes)) / (1024.0 * 1024.0),
         get(Counter::StagingDedicated),
         static_cast<double>(get(Counter::StagingDedicatedBytes)) / (1024.0 * 1024.0),
@@ -740,7 +741,8 @@ void RendererD3D12::ReportPerf(double interval_ms) {
              "Hitch GPU work: longest submission {:.1f} ms of {} | {} draws, {} dispatches | "
              "uploads {} ({:.2f} MiB, {} GPU-decoded), downloads {} ({:.2f} MiB) | local memory "
              "{:.0f}/{:.0f} MiB | uploads into CPU-writable memory {} ({:.2f} MiB) | volume "
-             "copies timed {} ({:.1f} ms GPU, longest {:.1f} ms)",
+             "copies timed {} ({:.1f} ms GPU, longest {:.1f} ms), ASTC decodes timed {} ({:.1f} "
+             "ms GPU, finished in the frame)",
              longest_submit_ms, get(Counter::Submits), get(Counter::Draws),
              get(Counter::Dispatches), get(Counter::TextureUploads),
              static_cast<double>(get(Counter::TextureUploadBytes)) / MIB,
@@ -749,7 +751,8 @@ void RendererD3D12::ReportPerf(double interval_ms) {
              static_cast<double>(memory.CurrentUsage) / MIB,
              static_cast<double>(memory.Budget) / MIB, get(Counter::CpuWritableUploads),
              static_cast<double>(get(Counter::CpuWritableUploadBytes)) / MIB,
-             get(Counter::GpuSections), Ms(delta, Counter::GpuSectionUs), longest_section_ms);
+             get(Counter::GpuSections), Ms(delta, Counter::GpuSectionUs), longest_section_ms,
+             get(Counter::AstcGpuSections), Ms(delta, Counter::AstcGpuSectionUs));
     if (VideoCore::Perf::DetailedGpuProfileEnabled()) {
         LOG_INFO(Render, "Hitch detail: {}", DescribeDrawCosts(delta, interval_ms));
         const auto stage_ms = [&](Counter counter) { return static_cast<double>(get(counter)) / 1e6; };

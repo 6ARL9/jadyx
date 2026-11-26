@@ -139,20 +139,22 @@ void Scheduler::CreateTimestamps() {
     section_data = static_cast<const u64*>(section_mapped);
 }
 
-void Scheduler::BeginSection() {
+bool Scheduler::BeginSection(SectionKind kind) {
     if (!section_data || section_open) {
-        return;
+        return false;
     }
     {
         std::scoped_lock lock{timestamp_mutex};
         if (pending_sections.size() + list_sections.size() >= SECTION_SLOTS) {
-            return; // every slot still waits for the GPU: this one goes unmeasured
+            return false; // every slot still waits for the GPU: this one goes unmeasured
         }
+        section_slot = section_next;
+        section_kinds[section_slot] = kind;
     }
-    section_slot = section_next;
     section_next = (section_next + 1) % SECTION_SLOTS;
     stream->EndQuery(section_heap.Get(), D3D12_QUERY_TYPE_TIMESTAMP, section_slot * 2);
     section_open = true;
+    return true;
 }
 
 void Scheduler::EndSection() {
@@ -233,9 +235,14 @@ void Scheduler::ReadTimestamps(u64 gpu_tick) {
         if (end > begin) {
             const u64 us =
                 static_cast<u64>(static_cast<double>(end - begin) * timestamp_us_per_tick);
-            VideoCore::Perf::Add(VideoCore::Perf::Counter::GpuSectionUs, us);
-            VideoCore::Perf::Add(VideoCore::Perf::Counter::GpuSections, 1);
-            longest_section_us = (std::max)(longest_section_us, us);
+            if (section_kinds[slot] == SectionKind::AstcDecode) {
+                VideoCore::Perf::Add(VideoCore::Perf::Counter::AstcGpuSectionUs, us);
+                VideoCore::Perf::Add(VideoCore::Perf::Counter::AstcGpuSections, 1);
+            } else {
+                VideoCore::Perf::Add(VideoCore::Perf::Counter::GpuSectionUs, us);
+                VideoCore::Perf::Add(VideoCore::Perf::Counter::GpuSections, 1);
+                longest_section_us = (std::max)(longest_section_us, us);
+            }
         }
     }
 }

@@ -88,9 +88,12 @@ public:
     /// (0 without timestamps).
     [[nodiscard]] u64 TakeLongestSubmitUs();
 
-    /// Timestamps around a part of the list being recorded (a streamed volume copy): once the
-    /// GPU is done, its time goes to Counter::GpuSectionUs. A flush closes an open section.
-    void BeginSection();
+    /// What a section times: its GPU time goes to GpuSectionUs or AstcGpuSectionUs.
+    enum class SectionKind : u8 { VolumeCopy, AstcDecode };
+    /// Timestamps around a part of the list being recorded (a streamed volume copy, an ASTC
+    /// decode): once the GPU is done, its time goes to the kind's counter. A flush closes an open
+    /// section. False when none was opened (one is open, no slot is free, or no timestamps).
+    bool BeginSection(SectionKind kind = SectionKind::VolumeCopy);
     void EndSection();
     /// The longest section finished since the last call, in microseconds.
     [[nodiscard]] u64 TakeLongestSectionUs();
@@ -249,7 +252,8 @@ private:
     std::deque<std::pair<u64, u32>> pending_timestamps; ///< (tick, slot)
     u64 longest_submit_us{}; ///< TakeLongestSubmitUs, under timestamp_mutex
 
-    static constexpr u32 SECTION_SLOTS = 64;
+    // A loading frame decoded 89 ASTC images on the GPU (Metroid Prime Remastered).
+    static constexpr u32 SECTION_SLOTS = 512;
     ComPtr<ID3D12QueryHeap> section_heap;
     ComPtr<ID3D12Resource> section_readback;
     const u64* section_data{};
@@ -258,6 +262,7 @@ private:
     bool section_open{};
     std::vector<u32> list_sections; ///< closed in the list being recorded (recording thread)
     std::deque<std::pair<u64, u32>> pending_sections; ///< (tick, slot), under timestamp_mutex
+    std::array<SectionKind, SECTION_SLOTS> section_kinds{}; ///< per slot, under timestamp_mutex
     u64 longest_section_us{}; ///< under timestamp_mutex
 
     static constexpr size_t SYNC_SITE_FRAMES = 6;
