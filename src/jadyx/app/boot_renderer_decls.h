@@ -49,6 +49,7 @@ void SetBcArrayAlias(u8 mode); // d3d12_texture_cache.h
 void SetBcVolumeStreaming(bool enabled); // d3d12_texture_cache.h
 void SetVolumesInGpuMemory(bool enabled); // d3d12_texture_cache.h
 void SetVolumeUploadBudget(u32 mib); // d3d12_texture_cache.h
+void SetScratchRelease(u32 seconds); // d3d12_texture_cache.h
 void SetAstcGpuDecode(bool enabled); // d3d12_texture_cache.h
 void SetBcGpuDecode(bool enabled); // d3d12_texture_cache.h
 void SetNotZeroedHeaps(bool enabled); // d3d12_resource_utils.h
@@ -70,6 +71,7 @@ void SetIdleHeapSeconds(u32 seconds); // d3d12_resource_allocator.h
 void SetPsoBlobs(bool enabled); // d3d12_pso_blob_cache.h
 void SetCachedStaging(bool enabled); // d3d12_staging_buffer_pool.h
 void SetKeepLargeStaging(bool enabled); // d3d12_staging_buffer_pool.h
+void SetKeepSmallReadbacks(bool enabled); // d3d12_staging_buffer_pool.h
 void SetCpuTextureWrites(bool enabled); // d3d12_resource_allocator.h
 void SetAstcGpuVerify(bool enabled); // d3d12_texture_cache.h
 void SetStencilBlitVerify(bool enabled); // d3d12_texture_cache.h
