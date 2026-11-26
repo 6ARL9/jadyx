@@ -246,7 +246,9 @@ void ApplyBootConfig(const BootConfig& config, const BootSurface& surface, bool 
     Core::CpuProfile::SetEnabled(config.cpu_profile);
     // Before the first compile, the prewarm's included: a bottleneck capture names the guest code.
     Common::SamplingProfiler::ClearJitBlocks();
-    const bool name_guest_code = config.hunt_menu || config.hunt_at > 0;
+    // Also for a profile of late frames only, whose guest code report is its point.
+    const bool name_guest_code =
+        config.hunt_menu || config.hunt_at > 0 || (config.profile && config.profile_stall_only);
     Dynarmic::JitProfile::block_observer.store(
         name_guest_code ? &Common::SamplingProfiler::NoteJitBlock : nullptr,
         std::memory_order_relaxed);
