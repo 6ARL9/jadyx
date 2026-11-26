@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <atomic>
 #include <chrono>
 
 #include "core/file_sys/vfs/vfs.h"
@@ -11,6 +12,10 @@
 #include "core/hle/service/service.h"
 
 namespace Service::FileSystem {
+
+/// Whether storage reads are held to 40 MB/s (IStorage::Read). On by default; boot.cfg
+/// read_pacing=0 turns it off.
+inline std::atomic<bool> storage_read_pacing{true};
 
 class IStorage final : public ServiceFramework<IStorage> {
 public:

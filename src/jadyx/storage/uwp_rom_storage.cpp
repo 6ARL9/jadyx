@@ -3,6 +3,7 @@
 #include "jadyx/storage/uwp_rom_storage.h"
 #include "jadyx/storage/storage_path.h"
 #include "jadyx/storage/rom_read_learner.h"
+#include "jadyx/storage/rom_disk_cache.h"
 #include "jadyx/i18n/localization.h"
 
 #include <algorithm>
@@ -32,6 +33,7 @@
 #include <winrt/Windows.Storage.Search.h>
 #include <winrt/Windows.Storage.FileProperties.h>
 #include <winrt/Windows.System.h>
+#include "common/cityhash.h"
 #include "common/host_stalls.h"
 #include "common/logging.h"
 #include "common/storage_trace.h"
@@ -94,6 +96,149 @@ std::atomic<bool> rom_readahead_enabled{false};
 /// same block are read ahead, at low I/O priority; the game's other reads go to the disk as
 /// before. On by default; boot.cfg rom_learn=0 turns it off.
 std::atomic<bool> rom_learn_enabled{true};
+
+/// Megabytes of the console's own storage for blocks of games on external storage already read
+/// (RomDiskCache; boot.cfg rom_cache_mib=, 0 turns it off).
+std::atomic<u32> rom_disk_cache_mib{1024};
+
+/// The cache file: one handle to write and one to read, so a background write never waits
+/// behind a read of the game or the other way round.
+class WindowsCacheFile final : public RomDiskCache::File {
+public:
+    WindowsCacheFile(HANDLE reader_, HANDLE writer_) : reader{reader_}, writer{writer_} {}
+    ~WindowsCacheFile() override {
+        CloseHandle(reader);
+        CloseHandle(writer);
+    }
+    bool Read(u64 at, u8* data, size_t size) override {
+        return Transfer(reader, at, data, size, false);
+    }
+    bool Write(u64 at, const u8* data, size_t size) override {
+        return Transfer(writer, at, const_cast<u8*>(data), size, true);
+    }
+
+private:
+    static bool Transfer(HANDLE handle, u64 at, u8* data, size_t size, bool writing) {
+        size_t done = 0;
+        while (done < size) {
+            const DWORD count = static_cast<DWORD>(std::min<size_t>(ReadChunk, size - done));
+            OVERLAPPED position{};
+            position.Offset = static_cast<DWORD>((at + done) & 0xffffffffULL);
+            position.OffsetHigh = static_cast<DWORD>((at + done) >> 32);
+            DWORD moved{};
+            const BOOL ok = writing ? WriteFile(handle, data + done, count, &moved, &position)
+                                  : ReadFile(handle, data + done, count, &moved, &position);
+            if (!ok || moved == 0) {
+                return false;
+            }
+            done += moved;
+        }
+        return true;
+    }
+    HANDLE reader;
+    HANDLE writer;
+};
+
+/// The cache, made the first time a large game file is opened with it on; null while off or
+/// when the console's storage has no room for it.
+RomDiskCache* DiskCache() {
+    static std::mutex mutex;
+    static std::unique_ptr<RomDiskCache> cache;
+    static bool tried = false;
+    std::scoped_lock lock{mutex};
+    if (tried) {
+        return cache.get();
+    }
+    tried = true;
+    const u64 wanted = u64{rom_disk_cache_mib.load(std::memory_order_relaxed)} << 20;
+    if (wanted == 0) {
+        LOG_INFO(Frontend, "ROM disk cache: off");
+        return nullptr;
+    }
+    try {
+        EnsureStorageApartment();
+        const std::wstring folder =
+            std::wstring{ApplicationData::Current().LocalFolder().Path()} + L"\\rom-cache";
+        CreateDirectoryFromAppW(folder.c_str(), nullptr);
+        // Leave 1 GiB to everything else on the console's storage; below 256 MiB it is not worth
+        // it and the cache stays off.
+        constexpr u64 MARGIN = 1ULL << 30;
+        constexpr u64 MINIMUM = 256ULL << 20;
+        ULARGE_INTEGER available{}, total{};
+        if (!GetDiskFreeSpaceExW(folder.c_str(), &available, &total, nullptr)) {
+            LOG_WARNING(Frontend, "ROM disk cache: off, free space unknown ({})", GetLastError());
+            return nullptr;
+        }
+        const u64 room = available.QuadPart > MARGIN ? available.QuadPart - MARGIN : 0;
+        const u64 capacity = std::min(wanted, room) / RomDiskCache::BLOCK * RomDiskCache::BLOCK;
+        if (capacity < MINIMUM) {
+            LOG_INFO(Frontend, "ROM disk cache: off, {} MiB free on the console's storage",
+                     available.QuadPart >> 20);
+            return nullptr;
+        }
+        const std::wstring path = folder + L"\\blocks.bin";
+        const HANDLE writer = CreateFile2FromAppW(path.c_str(), GENERIC_WRITE,
+                                                  FILE_SHARE_READ | FILE_SHARE_WRITE,
+                                                  CREATE_ALWAYS, nullptr);
+        if (writer == INVALID_HANDLE_VALUE) {
+            LOG_WARNING(Frontend, "ROM disk cache: off, cannot create its file ({})",
+                        GetLastError());
+            return nullptr;
+        }
+        const HANDLE reader = CreateFile2FromAppW(path.c_str(), GENERIC_READ,
+                                                  FILE_SHARE_READ | FILE_SHARE_WRITE,
+                                                  OPEN_EXISTING, nullptr);
+        if (reader == INVALID_HANDLE_VALUE) {
+            LOG_WARNING(Frontend, "ROM disk cache: off, cannot read its file ({})",
+                        GetLastError());
+            CloseHandle(writer);
+            return nullptr;
+        }
+        // The background writes go behind anything else on the console's storage.
+        FILE_IO_PRIORITY_HINT_INFO hint{};
+        hint.PriorityHint = IoPriorityHintLow;
+        SetFileInformationByHandle(writer, FileIoPriorityHintInfo, &hint, sizeof(hint));
+        cache = std::make_unique<RomDiskCache>(
+            std::make_unique<WindowsCacheFile>(reader, writer), capacity,
+            [](const u8* data, size_t size) {
+                return Common::CityHash64(reinterpret_cast<const char*>(data), size);
+            },
+            [] {
+                return static_cast<u64>(std::chrono::duration_cast<std::chrono::microseconds>(
+                                            std::chrono::steady_clock::now().time_since_epoch())
+                                            .count());
+            });
+        LOG_INFO(Frontend,
+                 "ROM disk cache: {} MiB in LocalState\\rom-cache ({} MiB free), {} KiB blocks",
+                 capacity >> 20, available.QuadPart >> 20, RomDiskCache::BLOCK >> 10);
+    } catch (const winrt::hresult_error& e) {
+        LOG_WARNING(Frontend, "ROM disk cache: off ({})", winrt::to_string(e.message()));
+    }
+    return cache.get();
+}
+
+/// A line about the cache every 30 s, from whichever thread reads then.
+void MaybeLogDiskCache(RomDiskCache& cache) {
+    static std::atomic<u64> last_us{0};
+    const u64 now = static_cast<u64>(std::chrono::duration_cast<std::chrono::microseconds>(
+                                         std::chrono::steady_clock::now().time_since_epoch())
+                                         .count());
+    u64 previous = last_us.load(std::memory_order_relaxed);
+    if (now - previous < 30'000'000 ||
+        !last_us.compare_exchange_strong(previous, now, std::memory_order_relaxed)) {
+        return;
+    }
+    const RomDiskCache::Stats s = cache.GetStats();
+    LOG_INFO(Frontend,
+             "ROM disk cache: {} reads from it ({:.1f} MiB, {:.2f} ms each), {} to the drive; "
+             "{} blocks written ({:.1f} MiB), {} not taken (queue full), {} evicted; "
+             "{} read back wrong, {} read failures, {} write failures; {} of {} MiB used",
+             s.hits, static_cast<double>(s.hit_bytes) / (1024.0 * 1024.0),
+             s.hits ? static_cast<double>(s.hit_us) / 1000.0 / static_cast<double>(s.hits) : 0.0,
+             s.misses, s.blocks_written, static_cast<double>(s.bytes_written) / (1024.0 * 1024.0),
+             s.dropped, s.evicted, s.mismatches, s.read_failures, s.write_failures,
+             s.used_bytes >> 20, s.capacity_bytes >> 20);
+}
 
 std::vector<u8> ReadWholeFile(const std::wstring& file_path, u64 max_bytes) {
     std::vector<u8> bytes;
@@ -857,6 +1002,7 @@ public:
                     handle = INVALID_HANDLE_VALUE;
                 } else {
                     size = static_cast<size_t>(bytes.QuadPart);
+                    disk_cached = size >= (64ULL << 20) && DiskCache() != nullptr;
                     // Large game files only: small ones are read once.
                     learning = rom_learn_enabled.load(std::memory_order_relaxed) &&
                                size >= (64ULL << 20) &&
@@ -939,6 +1085,35 @@ public:
             Trace(trace_us, trace_start, offset, length);
             return length;
         }
+        if (disk_cached) {
+            RomDiskCache& cache = *DiskCache();
+            if (cache.Read(cache_id, offset, data, length, size)) {
+                read_timer.Done(length);
+                Trace(trace_us, trace_start, offset, length, 'C');
+                MaybeLogDiskCache(cache);
+                return length;
+            }
+            // From the drive, stretched to whole blocks so they can be kept.
+            const auto [start, span] = RomDiskCache::Expand(offset, length, size);
+            if (span != 0) {
+                thread_local std::vector<u8> bounce;
+                bounce.resize(span);
+                bool read;
+                {
+                    std::scoped_lock lock{mutex};
+                    read = ReadAt(handle, bounce.data(), span, start);
+                }
+                if (read) {
+                    std::memcpy(data, bounce.data() + (offset - start), length);
+                    cache.Offer(cache_id, start, bounce.data(), span, size);
+                    read_timer.Done(length);
+                    Trace(trace_us, trace_start, start, span);
+                    MaybeLogDiskCache(cache);
+                    return length;
+                }
+                // A failed stretched read (past what the drive gives): the exact read below.
+            }
+        }
         std::scoped_lock lock{mutex}; // Serialize seek+read on this file, not the whole VFS.
         size_t done = 0;
         try {
@@ -986,11 +1161,11 @@ public:
         return done;
     }
 private:
-    /// One disk read for the storage trace (rom_trace).
+    /// One read for the storage trace (rom_trace): 'D' from the drive, 'C' from the disk cache.
     void Trace(u64 trace_us, std::chrono::steady_clock::time_point start, size_t offset,
-               size_t bytes) const {
+               size_t bytes, char kind = 'D') const {
         if (Common::StorageTrace::enabled.load(std::memory_order_relaxed)) {
-            Common::StorageTrace::Record('D', Common::StorageTrace::IdOf(this), trace_us, offset,
+            Common::StorageTrace::Record(kind, Common::StorageTrace::IdOf(this), trace_us, offset,
                                          bytes, Common::HostStalls::UsSince(start), 0, 0);
         }
     }
@@ -1006,6 +1181,7 @@ private:
     std::wstring wide_path; ///< for the read cache's own handle
     u32 cache_id{};
     bool learning{}; ///< reads go through the learned read-ahead (rom_learn)
+    bool disk_cached{}; ///< reads go through the disk cache (rom_cache_mib)
     mutable std::atomic<u64> last_end{~0ULL}; ///< end of the previous read, to spot in-order ones
     HANDLE handle{INVALID_HANDLE_VALUE};
     IRandomAccessStreamWithContentType stream{nullptr};
@@ -1198,6 +1374,10 @@ void SetRomReadAhead(bool enabled) {
 
 void SetRomLearn(bool enabled) {
     rom_learn_enabled.store(enabled, std::memory_order_relaxed);
+}
+
+void SetRomDiskCacheMiB(std::uint32_t mib) {
+    rom_disk_cache_mib.store(std::min<u32>(mib, 2048), std::memory_order_relaxed);
 }
 
 bool ConsumeStorageReadFailure() { return storage_read_failure.exchange(false); }

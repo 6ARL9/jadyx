@@ -239,6 +239,11 @@ struct BootConfig {
     bool rom_learn{true};
     /// Every read of the game's storage written to the log for offline study ("rom_trace=1").
     bool rom_trace{};
+    /// MiB of the console's storage for blocks of games on external storage already read
+    /// ("rom_cache_mib=0-2048"; 0 turns it off).
+    u32 rom_cache_mib{1024};
+    /// Storage reads held to 40 MB/s ("read_pacing=0|1").
+    bool read_pacing{true};
     /// The cache also reads ahead of in-order reads ("rom_readahead=0|1"; off by default).
     bool rom_readahead{};
     /// Fine per-draw D3D12 CPU timers ("gpu_profile=1"). Off because clock reads are measurable.

@@ -497,6 +497,23 @@ void ParseBootConfigFile(const std::string& install_path, BootConfig& config) {
                 }
                 continue;
             }
+            if (line.starts_with("rom_cache_mib=")) {
+                const unsigned long parsed =
+                    std::strtoul(line.substr(line.find('=') + 1).c_str(), nullptr, 10);
+                if (parsed <= 2048) {
+                    config.rom_cache_mib = static_cast<u32>(parsed);
+                    WriteDiag("boot.cfg: ROM disk cache " + std::to_string(parsed) + " MiB");
+                } else {
+                    WriteDiag("boot.cfg: invalid " + line + " (0-2048), ignored");
+                }
+                continue;
+            }
+            if (line == "read_pacing=0" || line == "read_pacing=1") {
+                config.read_pacing = line.back() == '1';
+                WriteDiag(std::string{"boot.cfg: storage read pacing "} +
+                          (config.read_pacing ? "on" : "off"));
+                continue;
+            }
             if (line == "rom_trace=0" || line == "rom_trace=1") {
                 config.rom_trace = line.back() == '1';
                 WriteDiag(std::string{"boot.cfg: ROM read trace "} +

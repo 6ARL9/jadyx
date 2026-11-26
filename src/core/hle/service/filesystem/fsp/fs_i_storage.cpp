@@ -56,7 +56,7 @@ Result IStorage::Read(
     const auto now = std::chrono::steady_clock::now();
     const u64 trace_us = Common::StorageTrace::NowUs();
     u64 paced_us = 0;
-    if (now < next_read_tick) {
+    if (now < next_read_tick && storage_read_pacing.load(std::memory_order_relaxed)) {
         std::this_thread::sleep_for(next_read_tick - now);
         paced_us = Common::HostStalls::UsSince(now);
     }

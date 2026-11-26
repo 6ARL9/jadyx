@@ -19,6 +19,7 @@
 #include "common/windows/cpu_pin.h"
 #include "common/windows/timed_wait_profile.h"
 #include "common/windows/timer_resolution.h"
+#include "core/hle/service/filesystem/fsp/fs_i_storage.h"
 #include "core/arm/cpu_profile.h"
 #include "core/arm/dynarmic/arm_dynarmic.h"
 #include "core/core.h"
@@ -331,6 +332,8 @@ void ApplyBootConfig(const BootConfig& config, const BootSurface& surface, bool 
     SetRomReadAhead(config.rom_readahead);
     SetRomLearn(config.rom_learn);
     Common::StorageTrace::SetEnabled(config.rom_trace);
+    SetRomDiskCacheMiB(config.rom_cache_mib);
+    Service::FileSystem::storage_read_pacing.store(config.read_pacing, std::memory_order_relaxed);
     Tegra::Texture::SetParallelUnswizzle(config.parallel_unswizzle);
     D3D12::SetTextureMemoryCap(u64{config.texture_cap_mib} << 20);
     D3D12::SetTextureMemoryLine(

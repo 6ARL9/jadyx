@@ -36,6 +36,10 @@ void SetRomReadAhead(bool enabled);
 /// read ahead on later visits (boot.cfg "rom_learn=0|1"; on by default). Journals are kept in
 /// LocalState/rom-learn.
 void SetRomLearn(bool enabled);
+/// Megabytes of the console's own storage that keep blocks of games on external storage already
+/// read (boot.cfg "rom_cache_mib=", 0-2048; 1024 by default, 0 turns it off). Kept in
+/// LocalState/rom-cache, started again each run, and off when the storage lacks the room.
+void SetRomDiskCacheMiB(std::uint32_t mib);
 // Bounded preflight, run on an MTA worker before starting the guest. Reports
 // access/removal errors in the library instead of closing the application.
 std::string CheckExternalGame(std::string_view path);
