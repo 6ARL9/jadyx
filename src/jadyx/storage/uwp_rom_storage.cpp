@@ -5,6 +5,7 @@
 #include "jadyx/storage/rom_read_learner.h"
 #include "jadyx/storage/rom_disk_cache.h"
 #include "jadyx/i18n/localization.h"
+#include "common/permafrost.h"
 
 #include <algorithm>
 #include <array>
@@ -1035,6 +1036,9 @@ public:
     size_t Read(u8* data, size_t length, size_t offset) const override {
         if (offset >= size || !length || !data) return 0;
         length = std::min(length, size - offset);
+        // The reads land in the file service's buffers, never in guest memory: a read back's
+        // pause need not wait for this thread to stop while the drive answers (pause_skip_io).
+        const Common::Permafrost::ScopedBlockingIo blocking_io;
         const Common::HostStalls::FileReadTimer read_timer;
         const u64 trace_us = Common::StorageTrace::NowUs();
         const auto trace_start = std::chrono::steady_clock::now();

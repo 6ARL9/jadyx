@@ -288,6 +288,7 @@ void ApplyBootConfig(const BootConfig& config, const BootSurface& surface, bool 
         .prefetch = config.guest_swap_prefetch,
         .pause_fill = config.guest_swap_pause_fill,
         .pause_hosts = config.guest_swap_pause_hosts,
+        .pause_skip_io = config.guest_swap_pause_skip_io,
     });
     // Keep the shared setting for other backends. D3D12 prepares on workers and always waits
     // for the exact PSO when a dependent draw reaches the command stream.

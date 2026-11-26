@@ -533,6 +533,12 @@ void ParseBootConfigFile(const std::string& install_path, BootConfig& config) {
                 }
                 continue;
             }
+            if (line == "guest_swap_pause_io=0" || line == "guest_swap_pause_io=1") {
+                config.guest_swap_pause_skip_io = line.back() == '1';
+                WriteDiag(std::string{"boot.cfg: guest swap pauses skip threads in disk reads "} +
+                          (config.guest_swap_pause_skip_io ? "on" : "off"));
+                continue;
+            }
             if (line == "readback_keep=0" || line == "readback_keep=1") {
                 config.readback_keep = line.back() == '1';
                 WriteDiag(std::string{"boot.cfg: small readback buffers kept "} +

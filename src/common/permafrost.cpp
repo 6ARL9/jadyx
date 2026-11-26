@@ -148,6 +148,9 @@ struct Engine {
     std::atomic<u64> fill_pauses{};
     std::atomic<u64> fill_pause_us{};
     std::atomic<u64> fill_pause_max_us{};
+    std::atomic<u64> fill_io_skips{};
+    std::atomic<u64> fill_stop_max_us{};
+    std::atomic<u32> fill_stop_max_thread{};
     std::atomic<u64> zero_faults{};
     std::atomic<u64> probation_starts{};
     std::atomic<u64> probation_touches{};
@@ -196,18 +199,33 @@ struct GuestThread {
     std::atomic<DWORD> id{};
     HANDLE handle{};
     bool host{};
+    /// ScopedBlockingIo scopes the thread is inside.
+    std::atomic<u32> io_depth{};
 };
 constexpr size_t MAX_GUEST_THREADS = 64;
 std::array<GuestThread, MAX_GUEST_THREADS> g_guest_threads{};
 std::atomic<u32> g_memory_threads{};
 std::mutex g_pause_mutex;
+/// The calling thread's slot in g_guest_threads, for ScopedBlockingIo.
+thread_local GuestThread* t_guest_slot{};
+
+/// What a pause waited for: threads in disk reads it suspended without waiting (pause_skip_io)
+/// and the one it waited longest for to stop.
+struct PauseWaits {
+    u64 io_skips{};
+    u64 slowest_us{};
+    DWORD slowest_thread{};
+};
 
 // Suspends every other registered thread (the host ones only with `hosts`) and waits for each
 // suspension to take effect: all are suspended first, then each is waited on, so the waits
 // overlap. Nothing may allocate, lock or log until they are resumed: a paused thread may hold the
 // heap lock.
-size_t PauseGuests(std::array<HANDLE, MAX_GUEST_THREADS>& paused, bool hosts) {
+size_t PauseGuests(std::array<HANDLE, MAX_GUEST_THREADS>& paused, bool hosts, bool skip_io,
+                   PauseWaits& waits) {
     const DWORD self = GetCurrentThreadId();
+    std::array<DWORD, MAX_GUEST_THREADS> ids{};
+    std::array<bool, MAX_GUEST_THREADS> in_io{};
     size_t count = 0;
     for (GuestThread& thread : g_guest_threads) {
         const DWORD id = thread.id.load(std::memory_order_acquire);
@@ -215,12 +233,28 @@ size_t PauseGuests(std::array<HANDLE, MAX_GUEST_THREADS>& paused, bool hosts) {
             SuspendThread(thread.handle) == static_cast<DWORD>(-1)) {
             continue;
         }
+        // Read after the suspension is asked for: a thread that enters a disk read later is
+        // waited for as before, and one seen inside it waits for this pause on its way out.
+        in_io[count] = skip_io && thread.io_depth.load(std::memory_order_seq_cst) != 0;
+        ids[count] = id;
         paused[count++] = thread.handle;
     }
     for (size_t i = 0; i < count; ++i) {
+        if (in_io[i]) {
+            ++waits.io_skips;
+            continue;
+        }
+        const auto start = std::chrono::steady_clock::now();
         CONTEXT context{};
         context.ContextFlags = CONTEXT_CONTROL;
         GetThreadContext(paused[i], &context);
+        const auto us = static_cast<u64>(std::chrono::duration_cast<std::chrono::microseconds>(
+                                             std::chrono::steady_clock::now() - start)
+                                             .count());
+        if (us > waits.slowest_us) {
+            waits.slowest_us = us;
+            waits.slowest_thread = ids[i];
+        }
     }
     return count;
 }
@@ -444,10 +478,12 @@ bool ReadBack(Engine& e, Granule& g, u8* begin, size_t first_chunk, size_t last_
     std::array<HANDLE, MAX_GUEST_THREADS> paused{};
     size_t paused_count = 0;
     std::chrono::steady_clock::time_point pause_start{};
+    PauseWaits pause_waits{};
     if (ok && e.config.pause_fill) {
         pause_lock = std::unique_lock{g_pause_mutex};
         pause_start = std::chrono::steady_clock::now();
-        paused_count = PauseGuests(paused, e.config.pause_hosts);
+        paused_count =
+            PauseGuests(paused, e.config.pause_hosts, e.config.pause_skip_io, pause_waits);
     }
     ForEachRun(want, [&](size_t run, size_t count) {
         const size_t fill_pages =
@@ -471,6 +507,12 @@ bool ReadBack(Engine& e, Granule& g, u8* begin, size_t first_chunk, size_t last_
         e.fill_pauses.fetch_add(1, std::memory_order_relaxed);
         e.fill_pause_us.fetch_add(paused_us, std::memory_order_relaxed);
         UpdateMax(e.fill_pause_max_us, paused_us);
+        e.fill_io_skips.fetch_add(pause_waits.io_skips, std::memory_order_relaxed);
+        if (pause_waits.slowest_us > e.fill_stop_max_us.load(std::memory_order_relaxed)) {
+            // Racy between fillers; it only names the thread for the heartbeat.
+            e.fill_stop_max_us.store(pause_waits.slowest_us, std::memory_order_relaxed);
+            e.fill_stop_max_thread.store(pause_waits.slowest_thread, std::memory_order_relaxed);
+        }
     }
     ReleaseReadBuffer(e, buffer_index);
     g_reads[record % READ_RECORDS] = ReadRecord{
@@ -1491,10 +1533,42 @@ Stats GetStats() {
     stats.fill_pauses = e->fill_pauses.load(std::memory_order_relaxed);
     stats.fill_pause_us = e->fill_pause_us.load(std::memory_order_relaxed);
     stats.fill_pause_max_us = e->fill_pause_max_us.load(std::memory_order_relaxed);
+    stats.fill_io_skips = e->fill_io_skips.load(std::memory_order_relaxed);
+    stats.fill_stop_max_us = e->fill_stop_max_us.load(std::memory_order_relaxed);
+    stats.fill_stop_max_thread = e->fill_stop_max_thread.load(std::memory_order_relaxed);
     stats.memory_threads = g_memory_threads.load(std::memory_order_relaxed);
     stats.fault_stall_us = e->fault_stall_us.load(std::memory_order_relaxed);
     return stats;
 }
+
+namespace {
+/// " name" of a registered thread, for the heartbeat; empty when it is gone or unnamed.
+std::string ThreadName(DWORD id) {
+    if (id == 0) {
+        return {};
+    }
+    // Only if free: a crash report may describe from anywhere.
+    std::unique_lock lock{g_pause_mutex, std::try_to_lock};
+    if (!lock.owns_lock()) {
+        return {};
+    }
+    for (const GuestThread& thread : g_guest_threads) {
+        if (thread.id.load(std::memory_order_relaxed) != id) {
+            continue;
+        }
+        PWSTR wide = nullptr;
+        if (FAILED(GetThreadDescription(thread.handle, &wide)) || wide == nullptr) {
+            return {};
+        }
+        char name[64]{};
+        const int length =
+            WideCharToMultiByte(CP_UTF8, 0, wide, -1, name, sizeof(name) - 1, nullptr, nullptr);
+        LocalFree(wide);
+        return length > 1 ? std::string{" "} + name : std::string{};
+    }
+    return {};
+}
+} // namespace
 
 std::string Describe(bool since_last) {
     if (!Active()) {
@@ -1530,10 +1604,14 @@ std::string Describe(bool since_last) {
         n(s.evictions), n(s.quick_refaults), n(s.refaults), s.shielded, s.min_idle_ms,
         n(s.window_reads), n(s.prefetch_reads), n(s.zero_faults), n(s.probe_hits), n(s.probe_arms),
         n(s.fault_stall_us / 1000));
-    char pause[160];
-    std::snprintf(pause, sizeof(pause), ", fill pauses %llu (avg %llu us, max %llu us) of %u threads",
+    char pause[320];
+    std::snprintf(pause, sizeof(pause),
+                  ", fill pauses %llu (avg %llu us, max %llu us) of %u threads, %llu in disk reads "
+                  "not waited for, longest stop %llu us (thread %u%s)",
                   n(s.fill_pauses), n(s.fill_pauses != 0 ? s.fill_pause_us / s.fill_pauses : 0),
-                  n(s.fill_pause_max_us), s.memory_threads);
+                  n(s.fill_pause_max_us), s.memory_threads, n(s.fill_io_skips),
+                  n(s.fill_stop_max_us), s.fill_stop_max_thread,
+                  ThreadName(s.fill_stop_max_thread).c_str());
     if (!since_last || span_ms == 0) {
         return text + std::string{pause};
     }
@@ -1591,7 +1669,9 @@ namespace {
 bool Register(bool host) {
     HANDLE handle{};
     if (!DuplicateHandle(GetCurrentProcess(), GetCurrentThread(), GetCurrentProcess(), &handle,
-                         THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT, FALSE, 0)) {
+                         THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT |
+                             THREAD_QUERY_LIMITED_INFORMATION,
+                         FALSE, 0)) {
         return false;
     }
     std::scoped_lock lock{g_pause_mutex};
@@ -1599,8 +1679,10 @@ bool Register(bool host) {
         if (thread.id.load(std::memory_order_relaxed) == 0) {
             thread.handle = handle;
             thread.host = host;
+            thread.io_depth.store(0, std::memory_order_relaxed);
             thread.id.store(GetCurrentThreadId(), std::memory_order_release);
             g_memory_threads.fetch_add(1, std::memory_order_relaxed);
+            t_guest_slot = &thread;
             return true;
         }
     }
@@ -1622,12 +1704,29 @@ void UnregisterGuestThread() {
             CloseHandle(thread.handle);
             thread.handle = nullptr;
             g_memory_threads.fetch_sub(1, std::memory_order_relaxed);
+            t_guest_slot = nullptr;
             return;
         }
     }
 }
 
 ScopedMemoryThread::ScopedMemoryThread() : registered{Register(true)} {}
+
+ScopedBlockingIo::ScopedBlockingIo() : slot{t_guest_slot} {
+    if (slot != nullptr) {
+        static_cast<GuestThread*>(slot)->io_depth.fetch_add(1, std::memory_order_seq_cst);
+    }
+}
+
+ScopedBlockingIo::~ScopedBlockingIo() {
+    if (slot == nullptr ||
+        static_cast<GuestThread*>(slot)->io_depth.fetch_sub(1, std::memory_order_seq_cst) != 1) {
+        return;
+    }
+    // A pause that saw this thread in its read did not wait for it: wait for that pause here,
+    // before going back to code that may touch guest memory.
+    std::scoped_lock wait_for_pause{g_pause_mutex};
+}
 
 ScopedMemoryThread::~ScopedMemoryThread() {
     if (registered) {
@@ -1710,6 +1809,8 @@ void RegisterGuestThread() {}
 void UnregisterGuestThread() {}
 ScopedMemoryThread::ScopedMemoryThread() = default;
 ScopedMemoryThread::~ScopedMemoryThread() = default;
+ScopedBlockingIo::ScopedBlockingIo() = default;
+ScopedBlockingIo::~ScopedBlockingIo() = default;
 } // namespace Common::Permafrost
 
 #endif

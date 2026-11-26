@@ -81,6 +81,11 @@ struct Config {
     /// audio, HLE services) are paused too. Without it they may read a page still zero or have a
     /// write of theirs overwritten by the fill.
     bool pause_hosts{true};
+    /// With pause_fill, whether a thread inside a ScopedBlockingIo is suspended without waiting
+    /// for it to stop. A thread in a disk read stops only when the drive answers: on a USB hard
+    /// drive that took up to 330 ms, with every other thread paused meanwhile (Metroid Prime
+    /// Remastered, 0.4.4.20: a fifth of the frozen time).
+    bool pause_skip_io{};
 };
 
 /// The calling thread runs guest code: it is paused while a read back fills pages. Unregistered
@@ -99,6 +104,22 @@ public:
 
 private:
     bool registered{};
+};
+
+/// Around a blocking disk read on a registered thread that touches only host memory meanwhile
+/// (the game's file reads, which land in HLE buffers). With pause_skip_io a read back's pause
+/// suspends the thread without waiting for it to stop: in the kernel it runs no guest code before
+/// the suspension takes hold, and on its way out it waits for a pause under way to end. Nests;
+/// does nothing on an unregistered thread.
+class ScopedBlockingIo {
+public:
+    ScopedBlockingIo();
+    ~ScopedBlockingIo();
+    ScopedBlockingIo(const ScopedBlockingIo&) = delete;
+    ScopedBlockingIo& operator=(const ScopedBlockingIo&) = delete;
+
+private:
+    void* slot{};
 };
 
 /// Takes over [base, base + size), which must be 2 MiB aligned in size. Fails without a swap file.
@@ -195,6 +216,9 @@ struct Stats {
     u64 fill_pauses{};        // reads back that paused the threads
     u64 fill_pause_us{};      // total time those threads were paused
     u64 fill_pause_max_us{};
+    u64 fill_io_skips{};      // threads in a disk read the pauses did not wait for (pause_skip_io)
+    u64 fill_stop_max_us{};   // the longest wait for one thread to stop, and that thread's id
+    u32 fill_stop_max_thread{};
     u32 memory_threads{};     // threads registered to be paused now, guest and host
     u64 fault_stall_us{};     // total time guest threads waited in faults: reads back, restores
                               // from probation and granules held by another thread
