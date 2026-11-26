@@ -6,9 +6,11 @@
 
 #pragma once
 
+#include <algorithm>
 #include <iterator>
 #include <cstring>
 #include <memory>
+#include <utility>
 
 namespace Common {
 
@@ -70,6 +72,7 @@ public:
             buffer_capacity = size;
         }
         last_requested_size = size;
+        largest_request = (std::max)(largest_request, size);
     }
 
     /// This will only grow the buffer's capacity if size is greater than the current capacity.
@@ -80,6 +83,7 @@ public:
             buffer = std::make_unique_for_overwrite<T[]>(buffer_capacity);
         }
         last_requested_size = size;
+        largest_request = (std::max)(largest_request, size);
     }
 
     [[nodiscard]] pointer data() noexcept {
@@ -122,6 +126,12 @@ public:
         return buffer_capacity;
     }
 
+    /// The largest size asked for since the last call, which forgets it: a buffer that grew for a
+    /// rare large request can be given back once such requests stop.
+    [[nodiscard]] size_type TakeLargestRequest() noexcept {
+        return std::exchange(largest_request, size_type{});
+    }
+
     void swap(ScratchBuffer& other) noexcept {
         std::swap(last_requested_size, other.last_requested_size);
         std::swap(buffer_capacity, other.buffer_capacity);
@@ -131,6 +141,7 @@ public:
 private:
     size_type last_requested_size{};
     size_type buffer_capacity{};
+    size_type largest_request{};
     std::unique_ptr<T[]> buffer{};
 };
 

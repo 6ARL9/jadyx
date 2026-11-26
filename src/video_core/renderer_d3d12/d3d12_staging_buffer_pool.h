@@ -137,6 +137,8 @@ private:
     [[nodiscard]] const ID3D12Resource* KeptLargeUpload() const;
     void ReleaseAllRetired(StagingBuffersCache& cache);
     void MeasureHeadroom();
+    /// SetKeepSmallReadbacks: a level of small readbacks that releases skip.
+    [[nodiscard]] bool KeepsSmallReadbacks(const StagingBuffersCache& cache, size_t log2) const;
 
     size_t Region(size_t iter) const noexcept {
         return iter / region_size;
@@ -159,6 +161,8 @@ private:
     HeadroomTracker headroom;
     u64 pressure_wait_tick{};
     unsigned guard_trim_cursor{};
+    /// A memory emergency or a refused allocation is being handled: nothing is kept.
+    bool releasing_everything{};
 
     StagingBuffersCache upload_cache;
     StagingBuffersCache download_cache;
@@ -185,6 +189,10 @@ void SetCachedStaging(bool enabled);
 /// Keeps one large upload buffer across frames instead of creating it again at each area load
 /// (on unless boot.cfg "keep_large_staging=0").
 void SetKeepLargeStaging(bool enabled);
+/// Keeps the small readback buffers (128 KiB and less, up to 32 MiB of them) for the session
+/// instead of releasing them and making them again ("readback_keep=1"). Only a memory emergency
+/// or a refused allocation still releases them.
+void SetKeepSmallReadbacks(bool enabled);
 [[nodiscard]] bool CachedStaging() noexcept;
 
 struct CachedStagingStats {

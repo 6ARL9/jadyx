@@ -8,6 +8,7 @@
 
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <deque>
 #include <functional>
 #include <limits>
@@ -62,6 +63,13 @@ using namespace Common::Literals;
 /// default, one part of up to 8 MiB a frame). At 32 MiB (five or six parts a frame) Metroid Prime
 /// Remastered's GPU took 50 to 255 ms in some of those frames.
 inline std::atomic<u32> streamed_volume_budget_mib{6};
+
+/// Seconds the large scratch memory of texture uploads may stay unused before it goes back to
+/// the system ("scratch_release_s=N", 0 to 600; 0 keeps it for the whole session, as before).
+/// Metroid Prime Remastered's light volumes left ~140 MiB of input and swizzle buffers held all
+/// session; on a console a few hundred MiB short, that much more of the guest's memory went to
+/// the swap file and came back with every thread paused.
+inline std::atomic<u32> scratch_release_seconds{0};
 
 /// Draws whose render target registers are clean skip preparing the bound attachments again while
 /// no image changed in a way that preparing them would act on (default; boot.cfg "rt_early_out=0"
@@ -608,6 +616,10 @@ private:
     void QueueAsyncUnswizzle(Image& image, ImageId image_id);
     void TickAsyncUnswizzle();
 
+    /// Gives back the upload scratch that grew for large images once none came for
+    /// scratch_release_seconds (TickFrame).
+    void ReleaseIdleScratch();
+
     Runtime& runtime;
 
     Tegra::MaxwellDeviceMemoryManager& device_memory;
@@ -734,6 +746,8 @@ private:
     /// Input buffers of finished asynchronous decodes, reused so a large image's blocks are not
     /// zero-filled and first touched on the GPU thread at every reload.
     std::vector<std::vector<u8>> async_decode_inputs;
+    /// When the upload scratch last served a large image, for ReleaseIdleScratch.
+    std::chrono::steady_clock::time_point scratch_large_use{};
     /// Chunk buffers of streamed decodes, shared by all of them so each reload reuses memory
     /// already touched (the TextureDecoder thread takes, the GPU thread gives back).
     std::mutex decode_chunk_mutex;

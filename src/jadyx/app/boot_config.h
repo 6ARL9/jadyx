@@ -279,6 +279,12 @@ struct BootConfig {
     bool core_nudge{};
     /// "core_nudge_ms=": how late a frame is before the cores are nudged (10-100).
     u32 core_nudge_ms{22};
+    /// "scratch_release_s=N" (0-600): the large upload scratch of the texture cache goes back to
+    /// the system after N seconds unused (VideoCommon::scratch_release_seconds; 0 keeps it).
+    u32 scratch_release_s{};
+    /// "readback_keep=1": small readback buffers (128 KiB and less) stay for the session instead
+    /// of going back and being made again (D3D12::SetKeepSmallReadbacks).
+    bool readback_keep{};
     /// How idle emulated cores wait for work ("idle_spin=off|adaptive|adaptive:<us>|fixed:<us>").
     Common::SpinPolicy idle_spin{};
     /// Per-game JIT profile, compiled before the guest runs ("jit_prewarm=1", the default),

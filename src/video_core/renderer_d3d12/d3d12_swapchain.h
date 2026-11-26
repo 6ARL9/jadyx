@@ -4,6 +4,7 @@
 #pragma once
 
 #include <array>
+#include <chrono>
 
 #include <dxgi1_4.h>
 
@@ -64,11 +65,19 @@ public:
 
 private:
     void GetImages();
+    /// Counts what reached the display (VideoCore::Perf Display*): late presents always, and the
+    /// vblanks and images shown from DXGI's frame statistics where the swapchain gives them.
+    void NoteDisplay();
 
     ComPtr<IDXGISwapChain3> swapchain;
     std::array<ComPtr<ID3D12Resource>, IMAGE_COUNT> images;
     HANDLE frame_latency_waitable{};
     u32 held_frames{}; ///< waitable counts taken without a Present (a latency under the maximum)
+    std::chrono::steady_clock::time_point last_present{};
+    DXGI_FRAME_STATISTICS last_stats{};
+    bool have_stats{};          ///< last_stats holds a sample to diff against
+    bool stats_usable{true};    ///< off once the statistics kept failing
+    u32 stats_failures{};
     u32 width;
     u32 height;
 };

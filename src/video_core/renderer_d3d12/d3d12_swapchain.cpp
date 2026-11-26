@@ -12,6 +12,7 @@
 
 #include "common/logging.h"
 #include "video_core/frame_trace.h"
+#include "video_core/perf_counters.h"
 #include "video_core/renderer_d3d12/d3d12_menu_image.h"
 #include "video_core/renderer_d3d12/d3d12_swapchain.h"
 
@@ -160,9 +161,58 @@ bool Swapchain::WaitForFrame(u32 latency) {
 }
 
 void Swapchain::Present(u32 sync_interval) {
-    const VideoCore::FrameTrace::ScopedSpan trace_present{
-        VideoCore::FrameTrace::Event::HostPresentLong, 0};
-    ThrowIfFailed(swapchain->Present(sync_interval, 0), "IDXGISwapChain::Present");
+    {
+        const VideoCore::FrameTrace::ScopedSpan trace_present{
+            VideoCore::FrameTrace::Event::HostPresentLong, 0};
+        ThrowIfFailed(swapchain->Present(sync_interval, 0), "IDXGISwapChain::Present");
+    }
+    NoteDisplay();
+}
+
+void Swapchain::NoteDisplay() {
+    using VideoCore::Perf::Counter;
+    const auto now = std::chrono::steady_clock::now();
+    if (last_present != std::chrono::steady_clock::time_point{}) {
+        const auto us = static_cast<u64>(
+            std::chrono::duration_cast<std::chrono::microseconds>(now - last_present).count());
+        VideoCore::Perf::Add(Counter::DisplayPresents, 1);
+        constexpr u64 VBLANK_US = 16667;
+        constexpr u64 LATE_US = 25000;
+        if (us > LATE_US) {
+            VideoCore::Perf::Add(Counter::DisplayLatePresents, 1);
+            VideoCore::Perf::Add(Counter::DisplayLateUs, us - VBLANK_US);
+        }
+    }
+    last_present = now;
+    if (!stats_usable) {
+        return;
+    }
+    DXGI_FRAME_STATISTICS stats{};
+    const HRESULT hr = swapchain->GetFrameStatistics(&stats);
+    if (FAILED(hr)) {
+        // Disjoint: a gap in the statistics (a mode change, the window hidden); start over.
+        have_stats = false;
+        if (hr != DXGI_ERROR_FRAME_STATISTICS_DISJOINT && ++stats_failures == 64) {
+            stats_usable = false;
+            LOG_INFO(Render, "D3D12: the swapchain gives no frame statistics (0x{:08X}); the "
+                     "display is measured by present times only", static_cast<u32>(hr));
+        }
+        return;
+    }
+    stats_failures = 0;
+    // The statistics follow the display, a frame or two behind the presents: diff only once an
+    // image more has been shown, so the vblanks in between are counted with it.
+    if (have_stats && stats.PresentCount == last_stats.PresentCount) {
+        return;
+    }
+    if (have_stats && stats.PresentCount > last_stats.PresentCount &&
+        stats.SyncRefreshCount >= last_stats.SyncRefreshCount) {
+        VideoCore::Perf::Add(Counter::DisplayShown, stats.PresentCount - last_stats.PresentCount);
+        VideoCore::Perf::Add(Counter::DisplayVblanks,
+                             stats.SyncRefreshCount - last_stats.SyncRefreshCount);
+    }
+    last_stats = stats;
+    have_stats = true;
 }
 
 } // namespace D3D12

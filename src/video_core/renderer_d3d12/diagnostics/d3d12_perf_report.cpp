@@ -336,7 +336,8 @@ std::string DescribeFrameChain(const VideoCore::Perf::Snapshot& d) {
         "times ({} frames of 3 paced at 2) | CPU writes queued without the cache locks {} ({} would be, {} mismatches, {} "
         "with the queue full), {} applied, {} GPU-modified meanwhile | JIT load table: {} pages "
         "left after GPU writes, {} slow loads would be inline ({} mismatches), {} flushes of "
-        "unmarked memory",
+        "unmarked memory | display: {} presents, {} over 25 ms apart ({:.1f} ms past a vblank); "
+        "DXGI showed {} images in {} vblanks",
         get(Counter::GuestFramesQueued), get(Counter::Vsyncs), get(Counter::VsyncsLost),
         get(Counter::VsyncFrames), Ms(d, Counter::VsyncComposeWaitUs), get(Counter::Composites),
         average_ms(Counter::CompositeLatencyUs, Counter::Composites), get(Counter::CompositesLate),
@@ -352,7 +353,9 @@ std::string DescribeFrameChain(const VideoCore::Perf::Snapshot& d) {
         get(Counter::CpuWriteDeferMismatches), get(Counter::CpuWriteQueueFull),
         get(Counter::CpuWritesDrained), get(Counter::CpuWritesLateGpu),
         get(Counter::JitReadPagesCleared), get(Counter::JitReadsWouldInline),
-        get(Counter::JitReadMismatches), get(Counter::GpuFlushUnmarked)) +
+        get(Counter::JitReadMismatches), get(Counter::GpuFlushUnmarked),
+        get(Counter::DisplayPresents), get(Counter::DisplayLatePresents),
+        Ms(d, Counter::DisplayLateUs), get(Counter::DisplayShown), get(Counter::DisplayVblanks)) +
         " | " + DescribeGuestExits(d);
 }
 
@@ -440,6 +443,10 @@ RendererD3D12::HitchProbe::HostTotals RendererD3D12::ReadHostTotals() const {
         .swap_stall_us = swap.fault_stall_us,
         .swap_ins = swap.swap_ins,
         .swap_read_bytes = swap.read_bytes,
+        .swap_fill_pauses = swap.fill_pauses,
+        .swap_fill_pause_us = swap.fill_pause_us,
+        .guest_commits = Common::HostStalls::Read(Counter::GuestCommits),
+        .guest_commit_bytes = Common::HostStalls::Read(Counter::GuestCommitBytes),
         .guest_call_us = Common::HostStalls::Read(Counter::GuestCallUs),
         .guest_requests = Common::HostStalls::Read(Counter::GuestRequests),
         .guest_request_us = Common::HostStalls::Read(Counter::GuestRequestUs),
@@ -481,6 +488,10 @@ RendererD3D12::HitchProbe::HostTotals RendererD3D12::HostDelta(const HitchProbe:
         .swap_stall_us = now.swap_stall_us - before.swap_stall_us,
         .swap_ins = now.swap_ins - before.swap_ins,
         .swap_read_bytes = now.swap_read_bytes - before.swap_read_bytes,
+        .swap_fill_pauses = now.swap_fill_pauses - before.swap_fill_pauses,
+        .swap_fill_pause_us = now.swap_fill_pause_us - before.swap_fill_pause_us,
+        .guest_commits = now.guest_commits - before.guest_commits,
+        .guest_commit_bytes = now.guest_commit_bytes - before.guest_commit_bytes,
         .guest_call_us = now.guest_call_us - before.guest_call_us,
         .guest_requests = now.guest_requests - before.guest_requests,
         .guest_request_us = now.guest_request_us - before.guest_request_us,
@@ -664,12 +675,18 @@ void RendererD3D12::ReportPerf(double interval_ms) {
                                  std::max(wall_ms - ran - idle, 0.0));
         }
         LOG_INFO(Render,
-                 "Hitch game: over {:.1f} ms, {} | swap waits {:.1f} ms ({} reads, {:.2f} MiB) | "
+                 "Hitch game: over {:.1f} ms, {} | swap waits {:.1f} ms ({} reads, {:.2f} MiB), "
+                 "threads paused {} times ({:.1f} ms), guest memory first touched {} times "
+                 "({:.1f} MiB) | "
                  "waited for the GPU {:.1f} ms ({}), for a free framebuffer {:.1f} ms ({}) | "
                  "longest system call {:#x} {:.1f} ms (all calls {:.1f} ms), longest service "
                  "request {:#x} {:.1f} ms ({} requests, {:.1f} ms)",
                  wall_ms, cores, swap_ms, host_delta.swap_ins,
                  static_cast<double>(host_delta.swap_read_bytes) / (1024.0 * 1024.0),
+                 host_delta.swap_fill_pauses,
+                 static_cast<double>(host_delta.swap_fill_pause_us) / 1000.0,
+                 host_delta.guest_commits,
+                 static_cast<double>(host_delta.guest_commit_bytes) / (1024.0 * 1024.0),
                  gpu_wait_ms, get(Counter::GuestGpuWaits), dequeue_wait_ms,
                  get(Counter::GuestDequeueWaits), longest_call & 0xff, longest_call_ms,
                  static_cast<double>(host_delta.guest_call_us) / 1000.0,
@@ -777,12 +794,17 @@ void RendererD3D12::ReportPerfWindow(u32 frames, double total_ms) {
                  "Game storage over the window: file service {} requests, waited for its thread "
                  "{:.1f} ms, handled {:.1f} ms | reads {} ({:.2f} MiB): paced {:.1f} ms, decrypted "
                  "{:.1f} ms, disk {:.1f} ms ({} disk reads) | guest service requests {} ({:.1f} ms) "
-                 "| host trim gave back {:.1f} MiB ({:.1f} ms busy)",
+                 "| host trim gave back {:.1f} MiB ({:.1f} ms busy) | guest swap: {} reads back "
+                 "({:.1f} MiB), threads paused {} times ({:.1f} ms), faults waited {:.1f} ms | "
+                 "guest memory first touched {} times ({:.1f} MiB)",
                  d.fs_requests, to_ms(d.fs_queue_us), to_ms(d.fs_handle_us), d.fs_reads,
                  static_cast<double>(d.fs_read_bytes) / (1024.0 * 1024.0), to_ms(d.fs_pace_us),
                  to_ms(d.fs_decrypt_us), to_ms(d.file_read_us), d.file_reads, d.guest_requests,
                  to_ms(d.guest_request_us), static_cast<double>(d.trim_released) / (1024.0 * 1024.0),
-                 to_ms(d.trim_busy_us));
+                 to_ms(d.trim_busy_us), d.swap_ins,
+                 static_cast<double>(d.swap_read_bytes) / (1024.0 * 1024.0), d.swap_fill_pauses,
+                 to_ms(d.swap_fill_pause_us), to_ms(d.swap_stall_us), d.guest_commits,
+                 static_cast<double>(d.guest_commit_bytes) / (1024.0 * 1024.0));
         Common::StorageTrace::Flush();
     }
     if (const std::string threads = Common::Windows::NamedThreadCpuReport(16); !threads.empty()) {

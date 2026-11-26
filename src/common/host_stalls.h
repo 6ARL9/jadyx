@@ -34,6 +34,10 @@ enum class Counter : size_t {
     // Host trim: emulated DRAM pages found all zero are given back to the OS.
     TrimReleasedBytes,
     TrimBusyUs,     ///< the trim thread inside a pass slice
+    // Emulated DRAM committed on its first touch (the demand-commit handler): each is a fault, an
+    // exception and a commit, then a page fault for every page of it the guest touches.
+    GuestCommits,
+    GuestCommitBytes,
     Count,
 };
 

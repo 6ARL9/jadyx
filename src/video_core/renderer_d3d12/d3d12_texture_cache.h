@@ -921,6 +921,9 @@ void SetBcVolumeStreaming(bool enabled);
 void SetVolumesInGpuMemory(bool enabled);
 /// Streamed volume parts uploaded per frame, in MiB (VideoCommon::streamed_volume_budget_mib).
 void SetVolumeUploadBudget(u32 mib);
+/// Seconds the texture cache's large upload scratch may stay unused before it goes back to the
+/// system (VideoCommon::scratch_release_seconds; 0 keeps it, 600 at most).
+void SetScratchRelease(u32 seconds);
 
 /// Whether ASTC images kept as RGBA8 are decoded by the compute shader (the default) rather than
 /// the CPU. Applies to images created from now on.

@@ -49,6 +49,11 @@ constexpr u64 KEPT_LARGE_UPLOAD_MAX = 64_MiB;
 constexpr u64 KEPT_LARGE_UPLOAD_FREE = 448_MiB;
 
 std::atomic<bool> keep_large_staging{true};
+/// SetKeepSmallReadbacks. A 64 KiB readback made again mid-game took 459 ms to create in Metroid
+/// Prime Remastered (0.4.4.16), and 18 to 26 of up to 128 KiB were made again in each session.
+std::atomic<bool> keep_small_readbacks{false};
+constexpr size_t SMALL_READBACK_LEVEL = 17; // 128 KiB
+constexpr u64 SMALL_READBACK_MAX_BYTES = 32_MiB;
 
 std::atomic<bool> cached_staging{false};
 std::atomic<u64> cached_buffers{0};
@@ -114,6 +119,10 @@ ComPtr<ID3D12Resource> CreateCachedUpload(ID3D12Device* device, u64 size,
 
 void SetKeepLargeStaging(bool enabled) {
     keep_large_staging.store(enabled, std::memory_order_relaxed);
+}
+
+void SetKeepSmallReadbacks(bool enabled) {
+    keep_small_readbacks.store(enabled, std::memory_order_relaxed);
 }
 
 void SetCachedStaging(bool enabled) {
@@ -240,6 +249,7 @@ bool StagingBufferPool::GuardMemory(const CacheMemorySnapshot& snapshot) {
     if (plan.finish) {
         scheduler.Finish();
     }
+    releasing_everything = plan.emergency;
     bool released_ring = false;
     if (ring_guard.Retiring() &&
         *std::max_element(sync_ticks.begin(), sync_ticks.end()) <= scheduler.KnownGpuTick()) {
@@ -293,6 +303,7 @@ bool StagingBufferPool::GuardMemory(const CacheMemorySnapshot& snapshot) {
             ReleaseLevel(download_cache, level);
         }
     }
+    releasing_everything = false;
     return released_ring;
 }
 
@@ -468,6 +479,15 @@ std::optional<StagingBufferRef> StagingBufferPool::RelieveMemoryPressure(size_t 
                                                                          bool allocation_failed) {
     // Only this usage's cache: the other may belong to a thread holding the other cache's mutex.
     StagingBuffersCache& cache = GetCache(usage);
+    // A refused allocation takes back the small readbacks too (SetKeepSmallReadbacks).
+    struct ReleasingEverything {
+        bool& flag;
+        bool previous;
+        ~ReleasingEverything() {
+            flag = previous;
+        }
+    } releasing{releasing_everything, releasing_everything};
+    releasing_everything = releasing_everything || allocation_failed;
     ReleaseAllRetired(cache);
     // Wait only on submitted work, so a draw being recorded is never split, and proactively once
     // per tick: under sustained pressure each command list stalls at most once, not per allocation.
@@ -515,10 +535,24 @@ StagingBufferPool::StagingBuffersCache& StagingBufferPool::GetCache(MemoryUsage 
     return usage == MemoryUsage::Download ? download_cache : upload_cache;
 }
 
+bool StagingBufferPool::KeepsSmallReadbacks(const StagingBuffersCache& cache, size_t log2) const {
+    if (&cache != &download_cache || log2 > SMALL_READBACK_LEVEL || releasing_everything ||
+        !keep_small_readbacks.load(std::memory_order_relaxed)) {
+        return false;
+    }
+    u64 bytes = 0;
+    for (size_t level = 0; level <= SMALL_READBACK_LEVEL; ++level) {
+        for (const StagingBuffer& entry : download_cache[level].entries) {
+            bytes += entry.mapped_span.size();
+        }
+    }
+    return bytes <= SMALL_READBACK_MAX_BYTES;
+}
+
 void StagingBufferPool::ReleaseLevel(StagingBuffersCache& cache, size_t log2,
                                      size_t max_checks, const ID3D12Resource* keep) {
     auto& staging = cache[log2];
-    if (staging.entries.empty()) {
+    if (staging.entries.empty() || KeepsSmallReadbacks(cache, log2)) {
         return;
     }
     const u64 completed = scheduler.KnownGpuTick();

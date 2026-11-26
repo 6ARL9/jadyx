@@ -404,6 +404,7 @@ void TextureCache<P>::TickFrame() {
     sentenced_image_view.Tick();
     TickAsyncDecode();
     TickAsyncUnswizzle();
+    ReleaseIdleScratch();
     static auto last_diag = std::chrono::steady_clock::now();
     if (const auto now = std::chrono::steady_clock::now(); now - last_diag >= std::chrono::seconds(2)) {
         last_diag = now;
@@ -2120,6 +2121,55 @@ void TextureCache<P>::QueueAsyncUnswizzle(Image& image, ImageId image_id) {
         .image_id = image_id,
         .info = image.info
     });
+}
+
+template <class P>
+void TextureCache<P>::ReleaseIdleScratch() {
+    const u32 seconds = scratch_release_seconds.load(std::memory_order_relaxed);
+    // Both swizzle buffers are taken every frame, so a large use is seen even with the release
+    // off: turning it on later starts the wait from the last one.
+    constexpr size_t LARGE = 16_MiB;
+    const bool large_use = swizzle_data_buffer.TakeLargestRequest() > LARGE ||
+                           unswizzle_data_buffer.TakeLargestRequest() > LARGE ||
+                           !async_decodes.empty() || !unswizzle_queue.empty();
+    const auto now = std::chrono::steady_clock::now();
+    if (large_use || scratch_large_use == std::chrono::steady_clock::time_point{}) {
+        scratch_large_use = now;
+        return;
+    }
+    if (seconds == 0 || now - scratch_large_use < std::chrono::seconds{seconds}) {
+        return;
+    }
+    // From here on nothing decodes: the decoder thread only takes chunks while a decode runs.
+    scratch_large_use = now;
+    size_t released = 0;
+    if (swizzle_data_buffer.capacity() > LARGE) {
+        released += swizzle_data_buffer.capacity();
+        swizzle_data_buffer = Common::ScratchBuffer<u8>(8_MiB);
+    }
+    if (unswizzle_data_buffer.capacity() > LARGE) {
+        released += unswizzle_data_buffer.capacity();
+        unswizzle_data_buffer = Common::ScratchBuffer<u8>(1_MiB);
+    }
+    for (const std::vector<u8>& input : async_decode_inputs) {
+        released += input.capacity();
+    }
+    async_decode_inputs.clear();
+    {
+        // The decoder thread uses the pool and the volume scratch only inside a decode, and the
+        // last one (cancelled ones included) ended long before the wait above ran out.
+        std::scoped_lock lock{decode_chunk_mutex};
+        for (const std::vector<u8>& chunk : decode_chunk_pool) {
+            released += chunk.capacity();
+        }
+        decode_chunk_pool.clear();
+        released += async_unswizzle_scratch.capacity();
+        std::vector<u8>{}.swap(async_unswizzle_scratch);
+    }
+    if (released != 0) {
+        LOG_INFO(HW_GPU, "Texture cache: gave back {} MiB of upload scratch unused for {} s",
+                 released >> 20, seconds);
+    }
 }
 
 template <class P>

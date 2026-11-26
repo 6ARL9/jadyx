@@ -186,6 +186,12 @@ enum class Counter : size_t {
     PresentWaitsLong,      ///< frames taken after waiting over 1 ms in all
     PresentsReplaced,      ///< present_mailbox: queued frames reused before being shown
     PresentsWouldReplace,  ///< present_mailbox=check: frames the mailbox would have reused
+    // What the display was given (Swapchain::Present), as opposed to the composites above.
+    DisplayPresents,       ///< presents after the first
+    DisplayLatePresents,   ///< of those, more than 25 ms (1.5 vblanks) after the previous one
+    DisplayLateUs,         ///< and how far past one vblank (16.7 ms) they came, in all
+    DisplayVblanks,        ///< vblanks DXGI's frame statistics counted, where it gives them
+    DisplayShown,          ///< images DXGI showed in those vblanks (the rest showed one again)
     VsyncComposeWaitsCut,  ///< vsync_nowait: composite waits cut at 2 ms (check: would cut)
     VsyncComposeWaitsFull, ///< vsync_nowait=1: full waits, a cut composite still in flight
     GuestSwapIntervalChanges, ///< the game changed its swap interval (logged with the cause)

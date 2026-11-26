@@ -363,6 +363,10 @@ private:
             u64 swap_stall_us{};
             u64 swap_ins{};
             u64 swap_read_bytes{};
+            u64 swap_fill_pauses{};   ///< reads back that paused every thread reaching guest memory
+            u64 swap_fill_pause_us{};
+            u64 guest_commits{};      ///< emulated DRAM committed on its first touch
+            u64 guest_commit_bytes{};
             u64 guest_call_us{};
             u64 guest_requests{};
             u64 guest_request_us{};

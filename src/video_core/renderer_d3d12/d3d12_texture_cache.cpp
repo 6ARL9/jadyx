@@ -153,6 +153,11 @@ void SetVolumeUploadBudget(u32 mib) {
                                                   std::memory_order_relaxed);
 }
 
+void SetScratchRelease(u32 seconds) {
+    VideoCommon::scratch_release_seconds.store((std::min)(seconds, 600U),
+                                               std::memory_order_relaxed);
+}
+
 void SetAstcGpuDecode(bool enabled) {
     gpu_astc_decode.store(enabled, std::memory_order_relaxed);
 }

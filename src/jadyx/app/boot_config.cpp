@@ -498,6 +498,24 @@ void ParseBootConfigFile(const std::string& install_path, BootConfig& config) {
                 }
                 continue;
             }
+            if (line.starts_with("scratch_release_s=")) {
+                const unsigned long parsed =
+                    std::strtoul(line.substr(line.find('=') + 1).c_str(), nullptr, 10);
+                if (parsed <= 600) {
+                    config.scratch_release_s = static_cast<u32>(parsed);
+                    WriteDiag("boot.cfg: texture upload scratch given back after " +
+                              std::to_string(parsed) + " s unused");
+                } else {
+                    WriteDiag("boot.cfg: invalid " + line + " (0-600), ignored");
+                }
+                continue;
+            }
+            if (line == "readback_keep=0" || line == "readback_keep=1") {
+                config.readback_keep = line.back() == '1';
+                WriteDiag(std::string{"boot.cfg: small readback buffers kept "} +
+                          (config.readback_keep ? "on" : "off"));
+                continue;
+            }
             if (line.starts_with("profile_threads=")) {
                 config.profile_threads = line.substr(line.find('=') + 1);
                 WriteDiag("boot.cfg: profiler threads " + config.profile_threads);

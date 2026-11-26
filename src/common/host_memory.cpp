@@ -70,6 +70,7 @@
 #include "common/assert.h"
 #include "common/free_region_manager.h"
 #include "common/host_memory.h"
+#include "common/host_stalls.h"
 #include "common/logging.h"
 #include "common/settings.h"
 #include "common/thread.h"
@@ -442,6 +443,9 @@ bool CommitBackingPage(u8* fault_addr) {
     }
     if (!committed) {
         RecordCommitFailure(reinterpret_cast<uintptr_t>(base + commit_offset), commit_len);
+    } else {
+        Common::HostStalls::Add(Common::HostStalls::Counter::GuestCommits, 1);
+        Common::HostStalls::Add(Common::HostStalls::Counter::GuestCommitBytes, commit_len);
     }
     g_commits_in_flight.fetch_sub(1);
     return committed;
