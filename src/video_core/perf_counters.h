@@ -288,6 +288,8 @@ enum class Counter : size_t {
     GpuSectionUs,
     AstcGpuSections,        ///< ASTC images decoded (and re-encoded) on the GPU, timed there
     AstcGpuSectionUs,
+    AstcBatches,            ///< SetAstcBatch: batches recorded, three barriers each
+    AstcBatchBands,         ///< and the bands in them (each took three barriers before)
     Count,
 };
 

@@ -35,6 +35,7 @@ namespace {
 std::atomic_bool small_texture_alignment{true};
 std::atomic_bool spare_heaps{true};
 std::atomic<u32> idle_heap_seconds{10};
+std::atomic_bool keep_target_heaps{false};
 /// Empty heaps kept past the warm one per class while they wait out idle_heap_seconds.
 constexpr u64 IDLE_HEAP_BYTES = 128_MiB;
 std::atomic_bool cpu_texture_writes{false};
@@ -324,6 +325,10 @@ void SetSpareHeaps(bool enabled) {
 
 void SetIdleHeapSeconds(u32 seconds) {
     idle_heap_seconds.store((std::min)(seconds, 600U), std::memory_order_relaxed);
+}
+
+void SetKeepTargetHeaps(bool enabled) {
+    keep_target_heaps.store(enabled, std::memory_order_relaxed);
 }
 
 void SetCpuTextureWrites(bool enabled) {
@@ -741,6 +746,11 @@ void TextureResourceAllocator::TrimEmptyHeaps(TrimMode mode) {
     // Releasing every empty heap on each pressured miss churned heaps that the next textures
     // would have reused. Settled keeps a heap until it has stayed empty for this many submits.
     constexpr u64 settle_ticks = 64;
+    const bool keep_targets = mode == TrimMode::SettledKeepTargets &&
+                              keep_target_heaps.load(std::memory_order_relaxed);
+    if (mode == TrimMode::SettledKeepTargets) {
+        mode = TrimMode::Settled;
+    }
     const u64 tick = mode == TrimMode::Settled ? scheduler.CurrentTick() : 0;
     // KeepWarm without pressure: the next burst of the same textures and render targets would
     // make them again, so the extra empty heaps wait a while (within a byte budget).
@@ -760,7 +770,10 @@ void TextureResourceAllocator::TrimEmptyHeaps(TrimMode mode) {
             continue;
         }
         const size_t type = static_cast<size_t>(block.heap_class);
-        if (mode == TrimMode::KeepWarm && !warm[type]) {
+        const bool target_class = block.heap_class == HeapClass::RenderTarget ||
+                                  block.heap_class == HeapClass::SmallRenderTarget ||
+                                  block.heap_class == HeapClass::TransientRenderTarget;
+        if ((mode == TrimMode::KeepWarm || (keep_targets && target_class)) && !warm[type]) {
             warm[type] = true;
             continue;
         }

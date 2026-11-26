@@ -28,6 +28,13 @@ void SetSpareHeaps(bool enabled);
 /// (4.8 GiB) a session, spares made on the other thread included (49 of 104 never used).
 void SetIdleHeapSeconds(u32 seconds);
 
+/// Over the texture cap (the app not short of memory), one empty heap per render target class
+/// stays instead of going back to the system ("heap_keep_targets=1"). Metroid Prime Remastered
+/// made 50 transient and 22 other render target heaps on the recording thread in a session
+/// (1.5 GiB), most while over the cap, and the system clears every page of a new heap: 96 MiB of
+/// them took 15 ms (0.4.4.22).
+void SetKeepTargetHeaps(bool enabled);
+
 /// Plain sampled textures (no render target, depth or UAV use) placed in CPU-writable heaps
 /// (write-back L0) on a cache-coherent UMA device, so the CPU writes their first upload in place
 /// instead of through staging and a GPU copy ("cpu_texture_writes=1"). Off for good once the
@@ -70,6 +77,9 @@ public:
     enum class TrimMode {
         KeepWarm, ///< Keep one warm empty heap per class, release the rest.
         Settled,  ///< Release heaps that stayed empty for a while; recent ones get reused.
+        /// As Settled, keeping one warm empty heap per render target class (SetKeepTargetHeaps):
+        /// over the texture cap without the app short of memory.
+        SettledKeepTargets,
         All,      ///< Release every empty heap (the system refused memory).
     };
     /// Called by the recording thread. Only fully free, fence-retired heaps are eligible.

@@ -250,6 +250,14 @@ private:
                            u32 src_subresource, const Region2D& dst_region,
                            const Region2D& src_region);
     void EnsureAstcBcScratch(u64 size);
+    /// SetAstcBatch: the slices of astc_batch_rgba, one band each; returns how many there are.
+    u32 EnsureAstcBatchScratch(u32 width, u32 height);
+    /// SetAstcBatch: an ASTC image recompressed to BC with its bands (every level, layer and
+    /// band) decoded, encoded and copied a batch at a time, three barriers per batch instead of
+    /// per band. False, with nothing recorded, when the bands do not fit the scratch budgets.
+    [[nodiscard]] bool UploadAstcBcBatched(Image& image, const StagingBufferRef& map,
+                                           std::span<const VideoCommon::SwizzleParameters> swizzles,
+                                           bool encode_bc1, bool encode_bc4);
     /// Before the first upload of an ASTC array recompressed to BC (Auto mode): writes a marker
     /// block into each layer and level with the copy engine, reads them through the texture unit
     /// and keeps the result for PollAstcArrayProbes. The upload then overwrites the markers.
@@ -370,6 +378,12 @@ private:
     u32 astc_rgba_width{};
     u32 astc_rgba_height{};
     u64 astc_bc_size{};
+    /// SetAstcBatch: slices of one size, a band in each, within ASTC_RGBA_SCRATCH_BUDGET.
+    ComPtr<ID3D12Resource> astc_batch_rgba;
+    D3D12_RESOURCE_STATES astc_batch_rgba_state{D3D12_RESOURCE_STATE_COMMON};
+    u32 astc_batch_width{};
+    u32 astc_batch_height{};
+    u32 astc_batch_slices{};
     /// Source copy for BlitWithinImage, kept for the next blit of the same family.
     ComPtr<ID3D12Resource> self_blit_scratch;
     D3D12_RESOURCE_STATES self_blit_state{D3D12_RESOURCE_STATE_COMMON};
@@ -973,6 +987,10 @@ void SetTextureYield(bool yield);
 void GetTextureMemoryUse(u64& heap_bytes, u64& cap);
 /// One-shot diagnostic: compare the first GPU BC3 result with the existing CPU pipeline.
 void SetAstcGpuVerify(bool enabled);
+/// ASTC images recompressed to BC on the GPU in batches of bands ("astc_batch=1"): each band
+/// (level, layer) took its own three barriers, and the GPU spent 4 ms per image on average, 136
+/// ms on one 64-layer array (Metroid Prime Remastered, 0.4.4.22).
+void SetAstcBatch(bool enabled);
 /// Diagnostic ("stencil_blit_verify=1"): the first scaled depth-stencil blits read both stencil
 /// planes back and log how the copy differs from the nearest-texel mapping the shader follows.
 void SetStencilBlitVerify(bool enabled);

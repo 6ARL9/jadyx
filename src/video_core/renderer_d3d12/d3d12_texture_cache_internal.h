@@ -161,6 +161,7 @@ inline std::atomic<bool> force_min_max_filter{false};
 inline std::atomic<bool> skip_min_max_filter{false};
 inline std::atomic<bool> emulate_min_max_filter{false};
 inline std::atomic<bool> gpu_astc_fresh{false};
+inline std::atomic<bool> gpu_astc_batch{false};
 /// Texture heap bytes above which clean textures are evicted with headroom left (0: no cap).
 inline std::atomic<u64> texture_memory_cap{0};
 /// App headroom kept clear of the textures: above it the cap grows into the rest (0: fixed cap).
@@ -173,6 +174,10 @@ inline std::atomic<u64> texture_cap_published{0};
 
 constexpr u64 ASTC_RGBA_SCRATCH_BUDGET = 32ULL * 1024 * 1024;
 constexpr u64 ASTC_BC_SCRATCH_BUDGET = 8ULL * 1024 * 1024;
+/// SetAstcBatch: the largest slice of the batch scratch (bands are cut to fit), and the most bands
+/// in one batch.
+constexpr u64 ASTC_BATCH_SLICE_BUDGET = 4ULL * 1024 * 1024;
+constexpr u32 ASTC_BATCH_MAX_BANDS = 64;
 /// Smaller uploads stay on the CPU: the dispatch and the extra copy cost more than they save.
 constexpr u64 GPU_UNSWIZZLE_MIN_BYTES = 64ULL * 1024;
 constexpr u64 GPU_UNSWIZZLE_SCRATCH_BUDGET = 8ULL * 1024 * 1024;

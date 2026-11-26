@@ -288,6 +288,12 @@ struct BootConfig {
     /// "readback_prewarm=N" (0-64): N readback buffers of 64 KiB and N of 128 KiB made before the
     /// game draws, readbacks of 64 KiB and less sharing them (D3D12::SetPrewarmReadbacks).
     u32 readback_prewarm{};
+    /// "astc_batch=1": ASTC images recompressed to BC on the GPU a batch of bands at a time
+    /// (D3D12::SetAstcBatch).
+    bool astc_batch{};
+    /// "heap_keep_targets=1": over the texture cap, one empty heap per render target class stays
+    /// (D3D12::SetKeepTargetHeaps).
+    bool heap_keep_targets{};
     /// How idle emulated cores wait for work ("idle_spin=off|adaptive|adaptive:<us>|fixed:<us>").
     Common::SpinPolicy idle_spin{};
     /// Per-game JIT profile, compiled before the guest runs ("jit_prewarm=1", the default),

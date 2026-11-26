@@ -236,6 +236,10 @@ void SetAstcGpuVerify(bool enabled) {
     gpu_astc_verify.store(enabled ? 64 : 0, std::memory_order_relaxed);
 }
 
+void SetAstcBatch(bool enabled) {
+    gpu_astc_batch.store(enabled, std::memory_order_relaxed);
+}
+
 void SetStencilBlitVerify(bool enabled) {
     stencil_blit_verify.store(enabled ? 8 : 0, std::memory_order_relaxed);
 }
@@ -511,8 +515,9 @@ void TextureCacheRuntime::TickFrame() {
                               texture_yield.load(std::memory_order_relaxed);
     texture_allocator.TrimEmptyHeaps(
         pressure_level >= CachePressure::Emergency ? TextureResourceAllocator::TrimMode::All
-        : release_idle                             ? TextureResourceAllocator::TrimMode::Settled
-                                                   : TextureResourceAllocator::TrimMode::KeepWarm);
+        : pressure_level >= CachePressure::Critical ? TextureResourceAllocator::TrimMode::Settled
+        : release_idle ? TextureResourceAllocator::TrimMode::SettledKeepTargets
+                       : TextureResourceAllocator::TrimMode::KeepWarm);
     if (pressure_level >= CachePressure::Critical) {
         transfer_buffers.TrimStale(pressure_level >= CachePressure::Emergency);
     } else {

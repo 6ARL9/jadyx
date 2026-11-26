@@ -32,7 +32,8 @@ UNIFORM(4) uint block_words; // 4 for BC3, 2 for BC1 and BC4
 UNIFORM(5) uint alpha_only;  // nonzero for BC4 of the alpha channel
 END_PUSH_CONSTANTS
 
-layout(binding = 0) uniform sampler2D source_image;
+// An array view of one slice: batched ASTC uploads give each band a slice of one scratch array.
+layout(binding = 0) uniform sampler2DArray source_image;
 layout(binding = 1, std430) writeonly restrict buffer OutputBuffer {
     uint output_words[];
 };
@@ -203,7 +204,7 @@ void main() {
         const uvec2 local = uvec2(i & 3u, i >> 2u);
         const uvec2 p = origin + local;
         texels[i] = p.x < image_width && p.y < image_height
-                        ? uvec4(round(clamp(texelFetch(source_image, ivec2(p), 0), 0.0, 1.0) *
+                        ? uvec4(round(clamp(texelFetch(source_image, ivec3(p, 0), 0), 0.0, 1.0) *
                                            255.0))
                         : uvec4(0u);
         rgb_min = min(rgb_min, texels[i].rgb);

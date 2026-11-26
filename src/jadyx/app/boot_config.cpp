@@ -545,6 +545,18 @@ void ParseBootConfigFile(const std::string& install_path, BootConfig& config) {
                           (config.readback_keep ? "on" : "off"));
                 continue;
             }
+            if (line == "astc_batch=0" || line == "astc_batch=1") {
+                config.astc_batch = line.back() == '1';
+                WriteDiag(std::string{"boot.cfg: ASTC GPU uploads in batches of bands "} +
+                          (config.astc_batch ? "on" : "off"));
+                continue;
+            }
+            if (line == "heap_keep_targets=0" || line == "heap_keep_targets=1") {
+                config.heap_keep_targets = line.back() == '1';
+                WriteDiag(std::string{"boot.cfg: render target heaps kept over the texture cap "} +
+                          (config.heap_keep_targets ? "on" : "off"));
+                continue;
+            }
             if (line.starts_with("readback_prewarm=")) {
                 const unsigned long parsed =
                     std::strtoul(line.substr(line.find('=') + 1).c_str(), nullptr, 10);

@@ -113,7 +113,8 @@ std::string DescribePerf(const VideoCore::Perf::Snapshot& d, double interval_ms)
         "guest flushes {} ({:.1f} ms), new resources {} ({:.1f} ms; cached buffers {}, {} placed; "
         "images {}), CPU texture decode {:.1f} ms, "
         "residual estimate {:.1f} ms (scopes may overlap) | GPU busy {:.1f} ms, {} submits | {} draws, {} dispatches | "
-        "uploads {} ({:.2f} MiB, {} GPU-decoded; ASTC timed {}, {:.1f} ms GPU), downloads {} ({:.2f} MiB) | staging: {} "
+        "uploads {} ({:.2f} MiB, {} GPU-decoded; ASTC timed {}, {:.1f} ms GPU, {} bands in {} "
+        "batches), downloads {} ({:.2f} MiB) | staging: {} "
         "dedicated ({:.2f} MiB), {} ring waits | texture replays {} ({} mismatched)",
         idle, get(Counter::FenceWaits), fence, get(Counter::PipelineStalls), pipelines,
         get(Counter::GpuThreadFlushes), flushes, get(Counter::ResourcesCreated), creates,
@@ -123,7 +124,8 @@ std::string DescribePerf(const VideoCore::Perf::Snapshot& d, double interval_ms)
         get(Counter::Dispatches), get(Counter::TextureUploads),
         static_cast<double>(get(Counter::TextureUploadBytes)) / (1024.0 * 1024.0),
         get(Counter::TextureGpuDecodes), get(Counter::AstcGpuSections),
-        Ms(d, Counter::AstcGpuSectionUs), get(Counter::TextureDownloads),
+        Ms(d, Counter::AstcGpuSectionUs), get(Counter::AstcBatchBands),
+        get(Counter::AstcBatches), get(Counter::TextureDownloads),
         static_cast<double>(get(Counter::TextureDownloadBytes)) / (1024.0 * 1024.0),
         get(Counter::StagingDedicated),
         static_cast<double>(get(Counter::StagingDedicatedBytes)) / (1024.0 * 1024.0),
