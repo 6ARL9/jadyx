@@ -42,6 +42,13 @@ struct Options {
     std::string threads;
     /// Sample only while a frame is late: nothing at all in between.
     bool stall_only{};
+    /// No profile: while a frame is late, only suspend and resume the chosen threads, as a
+    /// stall-only profile does (core nudge, boot.cfg core_nudge=1). In 0.4.4.16 the long "game
+    /// CPU work" hitches of Metroid Prime Remastered (40-110 ms, 30-50 a session in every
+    /// version before) all but went away with such a profile on the emulated cores; the
+    /// likeliest reason is that a resumed thread is placed again by the scheduler, away from a
+    /// busy SMT sibling it was stuck next to. Writes no file; logs its counts every window.
+    bool nudge_only{};
     /// File the windows are appended to; truncated by Start.
     std::filesystem::path output;
 };

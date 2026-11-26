@@ -308,7 +308,25 @@ public:
         // Reserved once: the copy is written while the target is suspended.
         stack_copy = static_cast<u8*>(VirtualAlloc(nullptr, MAX_STACK_COPY + COPY_SLACK,
                                                    MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE));
-        if (std::FILE* file = OpenOutput(output_started ? L"a" : L"w")) {
+        std::FILE* file = options.nudge_only ? nullptr : OpenOutput(output_started ? L"a" : L"w");
+        if (!file && !options.nudge_only) {
+            // Something holds the file (0.4.4.16 lost a session's profile so): another name.
+            const int error = last_open_error;
+            const std::filesystem::path alternate =
+                options.output.parent_path() /
+                ("jadyx_profile_" + std::to_string(GetCurrentProcessId()) + ".txt");
+            LOG_WARNING(Common, "profiler: cannot write {} (error {}); writing {} instead",
+                        options.output.filename().string(), error,
+                        alternate.filename().string());
+            options.output = alternate;
+            output_started = false;
+            file = OpenOutput(L"w");
+            if (!file) {
+                LOG_WARNING(Common, "profiler: cannot write {} either (error {})",
+                            alternate.filename().string(), last_open_error);
+            }
+        }
+        if (file) {
             output_started = true;
             std::fputs("# jadyx sampling profile v1\n", file);
             std::fputs(fmt::format("stall_ms {} stall_stride {} stall_only {} threads {}\n",
@@ -403,9 +421,10 @@ private:
         return WaitForMultipleObjects(2, handles, FALSE, INFINITE) != WAIT_OBJECT_0;
     }
 
-    std::FILE* OpenOutput(const wchar_t* mode) const {
+    std::FILE* OpenOutput(const wchar_t* mode) {
         std::FILE* file{};
-        return _wfopen_s(&file, options.output.c_str(), mode) == 0 ? file : nullptr;
+        last_open_error = _wfopen_s(&file, options.output.c_str(), mode);
+        return last_open_error == 0 ? file : nullptr;
     }
 
     void RefreshThreads() {
@@ -482,7 +501,7 @@ private:
         if (frame != 0 && NowNs() - frame > stall_ns) {
             ++stall_ticks;
             const bool sample = ++stall_tick_counter % options.stall_stride == 0;
-            if (sample) {
+            if (sample && !options.nudge_only) {
                 CountThreadStates(true);
             }
             for (u32 index = 0; index < threads.size(); ++index) {
@@ -498,7 +517,15 @@ private:
                 const bool ran = cycles - entry.last_cycles >= RUNNING_CYCLES;
                 entry.last_cycles = cycles;
                 if (sample) {
-                    Sample(index, entry, !ran, 1, true);
+                    if (options.nudge_only) {
+                        // The same suspension a stalled sample makes, with nothing recorded.
+                        CONTEXT context{};
+                        size_t copied{};
+                        ULONG_PTR origin{};
+                        Capture(entry, context, copied, origin);
+                    } else {
+                        Sample(index, entry, !ran, 1, true);
+                    }
                     QueryThreadCycleTime(entry.handle, &entry.last_cycles);
                 }
             }
@@ -744,8 +771,24 @@ private:
     }
 
     void WriteWindow() {
+        if (options.nudge_only) {
+            LOG_INFO(Common,
+                     "core nudge: {} ticks with a frame over {} ms late, {} threads nudged "
+                     "({:.1f} us held on average, {:.1f} us at most)",
+                     stall_ticks, options.stall_ms, suspensions,
+                     suspensions ? static_cast<double>(suspended_ns) / 1e3 /
+                                       static_cast<double>(suspensions)
+                                 : 0.0,
+                     static_cast<double>(max_suspended_ns) / 1e3);
+            return;
+        }
         std::FILE* file = OpenOutput(L"a");
         if (!file) {
+            if (!write_failure_logged) {
+                write_failure_logged = true;
+                LOG_WARNING(Common, "profiler: cannot write {} (error {})",
+                            options.output.filename().string(), last_open_error);
+            }
             return;
         }
         const double seconds =
@@ -1057,6 +1100,8 @@ private:
     std::vector<ThreadEntry*> threads;
     u64 seen_generation{~u64{}};
     size_t seen_registry_size{};
+    int last_open_error{};
+    bool write_failure_logged{};
 
     std::chrono::steady_clock::time_point window_start;
     u64 window_ticks{};

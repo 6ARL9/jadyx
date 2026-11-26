@@ -274,6 +274,11 @@ struct BootConfig {
     std::string profile_threads;
     /// "profile_stall_only=1": sample only while a frame is late.
     bool profile_stall_only{};
+    /// "core_nudge=1": while a frame is late, the emulated cores are suspended and resumed for a
+    /// moment every 2 ms, as a stall-only profile does (Common::SamplingProfiler nudge_only).
+    bool core_nudge{};
+    /// "core_nudge_ms=": how late a frame is before the cores are nudged (10-100).
+    u32 core_nudge_ms{22};
     /// How idle emulated cores wait for work ("idle_spin=off|adaptive|adaptive:<us>|fixed:<us>").
     Common::SpinPolicy idle_spin{};
     /// Per-game JIT profile, compiled before the guest runs ("jit_prewarm=1", the default),

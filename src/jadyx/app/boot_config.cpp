@@ -483,6 +483,21 @@ void ParseBootConfigFile(const std::string& install_path, BootConfig& config) {
                           (config.rom_learn ? "on" : "off"));
                 continue;
             }
+            if (line == "core_nudge=0" || line == "core_nudge=1") {
+                config.core_nudge = line.back() == '1';
+                WriteDiag(std::string{"boot.cfg: core nudge "} + (config.core_nudge ? "on" : "off"));
+                continue;
+            }
+            if (line.starts_with("core_nudge_ms=")) {
+                const unsigned long parsed =
+                    std::strtoul(line.substr(line.find('=') + 1).c_str(), nullptr, 10);
+                if (parsed >= 10 && parsed <= 100) {
+                    config.core_nudge_ms = static_cast<u32>(parsed);
+                } else {
+                    WriteDiag("boot.cfg: invalid " + line + " (10-100), ignored");
+                }
+                continue;
+            }
             if (line.starts_with("profile_threads=")) {
                 config.profile_threads = line.substr(line.find('=') + 1);
                 WriteDiag("boot.cfg: profiler threads " + config.profile_threads);

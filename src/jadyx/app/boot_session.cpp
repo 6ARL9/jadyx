@@ -609,6 +609,17 @@ void GameSession::StartGuest() {
                   "once in " + std::to_string(config.profile_stall_stride) +
                   " ticks while a frame is " + std::to_string(config.profile_stall_ms) +
                   " ms late");
+    } else if (config.core_nudge) {
+        // The suspensions of a stall-only profile of the cores, without the profile.
+        Common::SamplingProfiler::Start({.hz = 500,
+                                         .window_seconds = 60,
+                                         .stall_ms = config.core_nudge_ms,
+                                         .stall_stride = 1,
+                                         .threads = "CPUCore",
+                                         .stall_only = true,
+                                         .nudge_only = true});
+        WriteDiag("step: core nudge on, the emulated cores every 2 ms while a frame is " +
+                  std::to_string(config.core_nudge_ms) + " ms late");
     }
     // Run the guest. CpuManager spins up guest threads; dynarmic compiles + executes their code.
     // A resume's screen stays over it until the game presents.
