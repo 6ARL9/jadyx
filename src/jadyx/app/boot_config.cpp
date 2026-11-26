@@ -498,6 +498,29 @@ void ParseBootConfigFile(const std::string& install_path, BootConfig& config) {
                 }
                 continue;
             }
+            if (line.starts_with("coordinator_stall_on_ms=") ||
+                line.starts_with("coordinator_stall_off_ms=") ||
+                line.starts_with("coordinator_grace_ms=")) {
+                const std::string key = line.substr(0, line.find('='));
+                const unsigned long parsed =
+                    std::strtoul(line.substr(line.find('=') + 1).c_str(), nullptr, 10);
+                const bool grace = key == "coordinator_grace_ms";
+                if ((grace && parsed <= 60000) || (!grace && parsed <= 1000)) {
+                    const u32 value = static_cast<u32>(parsed);
+                    if (key == "coordinator_stall_on_ms") {
+                        config.coordinator_stall_on_ms = value;
+                    } else if (key == "coordinator_stall_off_ms") {
+                        config.coordinator_stall_off_ms = value;
+                    } else {
+                        config.coordinator_grace_ms = value;
+                    }
+                    WriteDiag("boot.cfg: memory coordinator " + key.substr(12) + " " +
+                              std::to_string(value));
+                } else {
+                    WriteDiag("boot.cfg: invalid " + line + ", ignored");
+                }
+                continue;
+            }
             if (line.starts_with("scratch_release_s=")) {
                 const unsigned long parsed =
                     std::strtoul(line.substr(line.find('=') + 1).c_str(), nullptr, 10);

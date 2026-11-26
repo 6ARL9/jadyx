@@ -527,6 +527,12 @@ struct BootConfig {
     /// memory_coordinator_floor_mib for its low mark.
     bool memory_coordinator{true};
     u32 memory_coordinator_floor_mib{512};
+    /// The coordinator's guest stall marks, in ms of stall per second, and how long a stall must
+    /// last before Permafrost's marks come down ("coordinator_stall_on_ms=", "..._off_ms=",
+    /// "coordinator_grace_ms="). Unset: Jadyx::MemoryCoordinator::Config's (32, 8, 3000).
+    std::optional<u32> coordinator_stall_on_ms;
+    std::optional<u32> coordinator_stall_off_ms;
+    std::optional<u32> coordinator_grace_ms;
     /// Guest memory through the host-mapped arena. Xbox uses a bounded hybrid section; "full" is
     /// diagnostic and falls back to hybrid if the complete mapping cannot be created.
     enum class Fastmem { Off, Auto, Hybrid, Full } fastmem{Fastmem::Off};

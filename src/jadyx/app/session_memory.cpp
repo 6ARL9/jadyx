@@ -68,6 +68,15 @@ coordinator_config.low_floor =
 if (config.texture_cap_line_mib) {
     coordinator_config.texture_line = u64{*config.texture_cap_line_mib} << 20;
 }
+if (config.coordinator_stall_on_ms) {
+    coordinator_config.stall_on_us_per_s = u64{*config.coordinator_stall_on_ms} * 1000;
+}
+if (config.coordinator_stall_off_ms) {
+    coordinator_config.stall_off_us_per_s = u64{*config.coordinator_stall_off_ms} * 1000;
+}
+if (config.coordinator_grace_ms) {
+    coordinator_config.grace_ms = *config.coordinator_grace_ms;
+}
 memory_plan.plan = Jadyx::MemoryCoordinator{coordinator_config}.Initial();
     if (config.host_trim) {
         trim_worker.emplace([this](std::stop_token stop) { RunHostTrim(stop); });
