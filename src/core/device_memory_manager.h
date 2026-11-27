@@ -16,6 +16,7 @@
 #include <span>
 
 #include "common/common_types.h"
+#include "common/permafrost.h"
 #include "common/range_mutex.h"
 #include "common/scratch_buffer.h"
 #include "common/sparse_large_vector.h"
@@ -118,6 +119,9 @@ public:
     /// Reads back what the guest swap holds of the range at once (Common::Permafrost::Prefault),
     /// before a read of all of it.
     void Prefault(DAddr address, size_t size);
+    /// The host memory runs of the range, for one Prefault of several ranges.
+    void AppendHostRuns(DAddr address, size_t size,
+                        std::vector<Common::Permafrost::HostRange>& runs);
     /// Same page translation and unmapped behavior; destination must be CPU write-combined.
     void ReadBlockUnsafeToWriteCombined(DAddr address, void* dest_pointer, size_t size);
     void WriteBlock(DAddr address, const void* src_pointer, size_t size);

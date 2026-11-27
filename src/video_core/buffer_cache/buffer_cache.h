@@ -2311,9 +2311,13 @@ void BufferCache<P>::UploadMemory(Buffer& buffer, u64 total_size_bytes, u64 larg
                                   std::span<BufferCopy> copies) {
     const VideoCore::Perf::ScopedFaults upload_faults{
         VideoCore::Perf::Counter::BufferUploadFaults};
-    // What the guest swap holds of the copies comes back in a read per granule.
-    for (const BufferCopy& copy : copies) {
-        device_memory.Prefault(buffer.CpuAddr() + copy.dst_offset, copy.size);
+    // What the guest swap holds of the copies comes back in one batch.
+    if (Common::Permafrost::PrefaultEnabled()) {
+        std::vector<Common::Permafrost::HostRange> runs;
+        for (const BufferCopy& copy : copies) {
+            device_memory.AppendHostRuns(buffer.CpuAddr() + copy.dst_offset, copy.size, runs);
+        }
+        Common::Permafrost::Prefault(runs);
     }
     if constexpr (USE_MEMORY_MAPS_FOR_UPLOADS) {
         MappedUploadMemory(buffer, total_size_bytes, copies);

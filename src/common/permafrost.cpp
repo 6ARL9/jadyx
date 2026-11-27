@@ -54,6 +54,9 @@ constexpr u8 HOT_HEAT = 2;
 constexpr u8 MAX_HEAT = 8;
 // Buffers a read back lands in before any page of the granule is committed.
 constexpr size_t READ_BUFFERS = 4;
+// Prefault: the batch buffer, and the most reads it keeps in flight.
+constexpr size_t PREFAULT_BUFFER = 8 * 1024 * 1024;
+constexpr size_t PREFAULT_IOS = 32;
 constexpr size_t MAX_WRITERS = 4;
 constexpr size_t PREFETCH_QUEUE = 256;
 // Granules the scout looks at per hold of the decommit mutex.
@@ -94,6 +97,9 @@ struct Engine {
     HANDLE file{INVALID_HANDLE_VALUE};
     u8* read_buffers[READ_BUFFERS]{};
     HANDLE read_events[READ_BUFFERS]{};
+    u8* prefault_buffer{};
+    HANDLE prefault_events[PREFAULT_IOS]{};
+    std::mutex prefault_mutex;
     std::atomic<u32> read_buffers_busy{};
     std::atomic<void*> reserve{};
     std::atomic<bool> reserve_released{};
@@ -167,6 +173,7 @@ struct Engine {
     std::atomic<u32> shielded{};
     std::atomic<u64> fault_stall_us{};
     std::atomic<u64> host_stall_us{};
+    std::atomic<u64> prefault_batches{};
     std::atomic<u64> prefault_reads{};
     std::atomic<u64> prefault_bytes{};
     std::atomic<u64> prefault_us{};
@@ -983,6 +990,10 @@ void Destroy(Engine* e) {
         if (e->read_buffers[i] != nullptr) VirtualFree(e->read_buffers[i], 0, MEM_RELEASE);
         if (e->read_events[i] != nullptr) CloseHandle(e->read_events[i]);
     }
+    if (e->prefault_buffer != nullptr) VirtualFree(e->prefault_buffer, 0, MEM_RELEASE);
+    for (HANDLE event : e->prefault_events) {
+        if (event != nullptr) CloseHandle(event);
+    }
     for (size_t i = 0; i < MAX_WRITERS; ++i) {
         if (e->staging[i] != nullptr) VirtualFree(e->staging[i], 0, MEM_RELEASE);
         if (e->write_events[i] != nullptr) CloseHandle(e->write_events[i]);
@@ -1022,6 +1033,14 @@ bool Init(u8* base, size_t size, const Platform& platform, const Config& config)
         e->read_buffers[i] = static_cast<u8*>(platform.allocate(GRANULE_SIZE));
         e->read_events[i] = NewEvent();
         ok = e->read_buffers[i] != nullptr && e->read_events[i] != nullptr;
+    }
+    if (ok && config.prefault) {
+        e->prefault_buffer = static_cast<u8*>(platform.allocate(PREFAULT_BUFFER));
+        ok = e->prefault_buffer != nullptr;
+        for (size_t i = 0; ok && i < PREFAULT_IOS; ++i) {
+            e->prefault_events[i] = NewEvent();
+            ok = e->prefault_events[i] != nullptr;
+        }
     }
     for (size_t i = 0; ok && i < e->writer_count; ++i) {
         e->staging[i] = static_cast<u8*>(platform.allocate(GRANULE_SIZE));
@@ -1133,42 +1152,71 @@ bool PrefaultEnabled() {
 }
 
 void Prefault(const u8* begin, const u8* end) {
+    if (begin < end) {
+        const HostRange range{begin, static_cast<size_t>(end - begin)};
+        Prefault(std::span<const HostRange>{&range, 1});
+    }
+}
+
+void Prefault(std::span<const HostRange> ranges) {
     Engine* const e = g_engine.load(std::memory_order_acquire);
-    if (e == nullptr || !e->config.prefault || begin >= end) {
+    if (e == nullptr || !e->config.prefault || e->prefault_buffer == nullptr || ranges.empty()) {
         return;
     }
-    const u8* const low = (std::max)(begin, static_cast<const u8*>(e->base));
-    const u8* const high = (std::min)(end, static_cast<const u8*>(e->base + e->size));
-    if (low >= high) {
-        return;
-    }
-    const size_t first_index = static_cast<size_t>(low - e->base) / GRANULE_SIZE;
-    const size_t last_index = static_cast<size_t>(high - 1 - e->base) / GRANULE_SIZE;
-    for (size_t index = first_index; index <= last_index; ++index) {
-        Granule& g = e->table[index];
-        if (g.state.load(std::memory_order_acquire) != Swapped) {
-            continue; // resident, on probation (a touch restores it) or another thread's
+    // The pages wanted of each granule with data on disk.
+    struct Want {
+        size_t index;
+        Mask pages;
+        bool ok;
+    };
+    std::vector<Want> wants;
+    const u8* const base = e->base;
+    for (const HostRange& range : ranges) {
+        const u8* const low = (std::max)(range.begin, base);
+        const u8* const high = (std::min)(range.begin + range.size, base + e->size);
+        if (low >= high) {
+            continue;
         }
+        const size_t last_page = (static_cast<size_t>(high - base) + PAGE_SIZE - 1) / PAGE_SIZE;
+        for (size_t page = static_cast<size_t>(low - base) / PAGE_SIZE; page < last_page;) {
+            const size_t index = page / GRANULE_PAGES;
+            const size_t stop = (std::min)(last_page, (index + 1) * GRANULE_PAGES);
+            if (e->table[index].state.load(std::memory_order_acquire) == Swapped) {
+                auto it = std::find_if(wants.rbegin(), wants.rend(),
+                                       [index](const Want& want) { return want.index == index; });
+                Want& want = it != wants.rend() ? *it : wants.emplace_back(Want{index, {}, true});
+                for (size_t p = page; p < stop; ++p) {
+                    want.pages.set(p - index * GRANULE_PAGES);
+                }
+            }
+            page = stop;
+        }
+    }
+    if (wants.empty()) {
+        return;
+    }
+    const auto start = std::chrono::steady_clock::now();
+    std::scoped_lock prefault_lock{e->prefault_mutex};
+    // Owned now: what is wanted is what is on disk.
+    std::vector<Want> owned;
+    owned.reserve(wants.size());
+    for (Want& want : wants) {
+        Granule& g = e->table[want.index];
         g.in_flight.fetch_add(1);
         u8 state = Swapped;
         if (!g.state.compare_exchange_strong(state, Busy)) {
             g.in_flight.fetch_sub(1);
             continue;
         }
-        u8* const granule = e->base + index * GRANULE_SIZE;
-        const size_t first_page =
-            static_cast<size_t>((std::max)(low, static_cast<const u8*>(granule)) - granule) / PAGE_SIZE;
-        const size_t end_page =
-            (static_cast<size_t>((std::min)(high, static_cast<const u8*>(granule + GRANULE_SIZE)) -
-                                 granule) +
-             PAGE_SIZE - 1) /
-            PAGE_SIZE;
-        const size_t first_chunk = first_page / CHUNK_PAGES;
-        const size_t last_chunk = (end_page + CHUNK_PAGES - 1) / CHUNK_PAGES;
-        const auto start = std::chrono::steady_clock::now();
-        const u64 now = NowMs();
+        want.pages &= g.data;
+        if (want.pages.none()) {
+            SettleOut(g);
+            g.in_flight.fetch_sub(1);
+            continue;
+        }
         if (g.evicted_at != 0) {
-            // A read back like a fault's: the same bookkeeping of how soon it came back.
+            // Back like after a fault: the same bookkeeping of how soon.
+            const u64 now = NowMs();
             const u64 distance = now - g.evicted_at;
             g.evicted_at = 0;
             e->refaults.fetch_add(1, std::memory_order_relaxed);
@@ -1183,26 +1231,156 @@ void Prefault(const u8* begin, const u8* end) {
             }
             g.window = 0;
         }
-        g.last_access.store(now, std::memory_order_relaxed);
-        const u64 before = e->read_bytes.load(std::memory_order_relaxed);
-        const bool ok = ReadBack(*e, g, granule, first_chunk, last_chunk, false);
-        const u64 read = e->read_bytes.load(std::memory_order_relaxed) - before;
-        SettleOut(g);
-        g.in_flight.fetch_sub(1);
-        AddStall(*e, start);
-        if (read != 0) {
-            e->prefault_reads.fetch_add(1, std::memory_order_relaxed);
-            e->prefault_bytes.fetch_add(read, std::memory_order_relaxed);
-            e->prefault_us.fetch_add(
-                static_cast<u64>(std::chrono::duration_cast<std::chrono::microseconds>(
-                                     std::chrono::steady_clock::now() - start)
-                                     .count()),
-                std::memory_order_relaxed);
-        }
-        if (!ok) {
-            return; // the faults try again, page by page
-        }
+        g.last_access.store(NowMs(), std::memory_order_relaxed);
+        owned.push_back(want);
     }
+    // A piece read into the batch buffer, filled into its pages after the reads.
+    struct Piece {
+        size_t want;
+        size_t page;
+        size_t count;
+        size_t offset;
+    };
+    std::vector<Piece> pieces;
+    size_t next = 0;
+    while (next < owned.size()) {
+        // The batch: granules whose wanted pages fit the buffer together.
+        size_t batch_end = next;
+        size_t bytes = 0;
+        while (batch_end < owned.size() &&
+               (batch_end == next ||
+                bytes + owned[batch_end].pages.count() * PAGE_SIZE <= PREFAULT_BUFFER)) {
+            bytes += owned[batch_end].pages.count() * PAGE_SIZE;
+            ++batch_end;
+        }
+        pieces.clear();
+        size_t offset = 0;
+        for (size_t w = next; w < batch_end; ++w) {
+            ForEachRun(owned[w].pages, [&](size_t run, size_t count) {
+                pieces.push_back(Piece{w, run, count, offset});
+                offset += count * PAGE_SIZE;
+            });
+        }
+        // Every read in flight at once, up to the events there are.
+        std::array<OVERLAPPED, PREFAULT_IOS> ats{};
+        std::array<size_t, PREFAULT_IOS> at_piece{};
+        std::array<bool, PREFAULT_IOS> at_busy{};
+        const auto finish = [&](size_t slot) {
+            DWORD done{};
+            const Piece& piece = pieces[at_piece[slot]];
+            if (!GetOverlappedResultEx(e->file, &ats[slot], &done, INFINITE, FALSE) ||
+                done != piece.count * PAGE_SIZE) {
+                owned[piece.want].ok = false;
+            }
+            at_busy[slot] = false;
+        };
+        for (size_t i = 0; i < pieces.size(); ++i) {
+            const size_t slot = i % PREFAULT_IOS;
+            if (at_busy[slot]) {
+                finish(slot);
+            }
+            const Piece& piece = pieces[i];
+            const Granule& g = e->table[owned[piece.want].index];
+            const u64 file_offset = u64{g.slot} * GRANULE_SIZE + piece.page * PAGE_SIZE;
+            ats[slot] = OVERLAPPED{};
+            ats[slot].Offset = static_cast<DWORD>(file_offset);
+            ats[slot].OffsetHigh = static_cast<DWORD>(file_offset >> 32);
+            ats[slot].hEvent = e->prefault_events[slot];
+            at_piece[slot] = i;
+            const BOOL started =
+                ReadFile(e->file, e->prefault_buffer + piece.offset,
+                         static_cast<DWORD>(piece.count * PAGE_SIZE), nullptr, &ats[slot]);
+            if (!started && GetLastError() != ERROR_IO_PENDING) {
+                owned[piece.want].ok = false;
+                continue;
+            }
+            at_busy[slot] = true;
+        }
+        for (size_t slot = 0; slot < PREFAULT_IOS; ++slot) {
+            if (at_busy[slot]) {
+                finish(slot);
+            }
+        }
+        // One pause fills them all.
+        std::vector<Mask> filled(batch_end - next);
+        {
+            std::unique_lock<std::mutex> pause_lock;
+            std::array<HANDLE, MAX_GUEST_THREADS> paused{};
+            size_t paused_count = 0;
+            std::chrono::steady_clock::time_point pause_start{};
+            PauseWaits pause_waits{};
+            if (e->config.pause_fill) {
+                pause_lock = std::unique_lock{g_pause_mutex};
+                pause_start = std::chrono::steady_clock::now();
+                paused_count = PauseGuests(paused, e->config.pause_hosts,
+                                           e->config.pause_skip_io, pause_waits);
+            }
+            for (const Piece& piece : pieces) {
+                Want& want = owned[piece.want];
+                if (!want.ok) {
+                    continue;
+                }
+                u8* const target = e->base + want.index * GRANULE_SIZE + piece.page * PAGE_SIZE;
+                const size_t size = piece.count * PAGE_SIZE;
+                if (!CommitPages(*e, target, size)) {
+                    want.ok = false;
+                    continue;
+                }
+                std::memcpy(target, e->prefault_buffer + piece.offset, size);
+                for (size_t p = piece.page; p < piece.page + piece.count; ++p) {
+                    filled[piece.want - next].set(p);
+                }
+            }
+            ResumeGuests(paused, paused_count);
+            if (pause_lock.owns_lock()) {
+                pause_lock.unlock();
+                const auto paused_us =
+                    static_cast<u64>(std::chrono::duration_cast<std::chrono::microseconds>(
+                                         std::chrono::steady_clock::now() - pause_start)
+                                         .count());
+                e->fill_pauses.fetch_add(1, std::memory_order_relaxed);
+                e->fill_pause_us.fetch_add(paused_us, std::memory_order_relaxed);
+                UpdateMax(e->fill_pause_max_us, paused_us);
+                e->fill_io_skips.fetch_add(pause_waits.io_skips, std::memory_order_relaxed);
+            }
+        }
+        e->prefault_batches.fetch_add(1, std::memory_order_relaxed);
+        for (size_t w = next; w < batch_end; ++w) {
+            Want& want = owned[w];
+            Granule& g = e->table[want.index];
+            if (want.ok) {
+                const u64 want_bytes = want.pages.count() * PAGE_SIZE;
+                g.empty.store(false, std::memory_order_relaxed);
+                g.data &= ~want.pages;
+                if (g.data.none()) {
+                    FreeSlot(*e, g.slot);
+                    g.slot = NO_SLOT;
+                }
+                e->swapped_bytes.fetch_sub(want_bytes, std::memory_order_relaxed);
+                e->read_bytes.fetch_add(want_bytes, std::memory_order_relaxed);
+                e->swap_ins.fetch_add(1, std::memory_order_relaxed);
+                if (g.data.any()) {
+                    e->window_reads.fetch_add(1, std::memory_order_relaxed);
+                }
+                e->prefault_reads.fetch_add(1, std::memory_order_relaxed);
+                e->prefault_bytes.fetch_add(want_bytes, std::memory_order_relaxed);
+            } else {
+                // The slot still holds everything: what was filled goes again.
+                ForEachRun(filled[w - next], [&](size_t run, size_t count) {
+                    VirtualFree(e->base + want.index * GRANULE_SIZE + run * PAGE_SIZE,
+                                count * PAGE_SIZE, MEM_DECOMMIT);
+                });
+            }
+            SettleOut(g);
+            g.in_flight.fetch_sub(1);
+        }
+        next = batch_end;
+    }
+    AddStall(*e, start);
+    e->prefault_us.fetch_add(static_cast<u64>(std::chrono::duration_cast<std::chrono::microseconds>(
+                                                  std::chrono::steady_clock::now() - start)
+                                                  .count()),
+                             std::memory_order_relaxed);
 }
 
 void ForgetPages(u8* begin, u8* end) {
@@ -1625,6 +1803,7 @@ Stats GetStats() {
     stats.memory_threads = g_memory_threads.load(std::memory_order_relaxed);
     stats.fault_stall_us = e->fault_stall_us.load(std::memory_order_relaxed);
     stats.host_stall_us = e->host_stall_us.load(std::memory_order_relaxed);
+    stats.prefault_batches = e->prefault_batches.load(std::memory_order_relaxed);
     stats.prefault_reads = e->prefault_reads.load(std::memory_order_relaxed);
     stats.prefault_bytes = e->prefault_bytes.load(std::memory_order_relaxed);
     stats.prefault_us = e->prefault_us.load(std::memory_order_relaxed);
@@ -1708,12 +1887,13 @@ std::string Describe(bool since_last) {
     std::snprintf(pause, sizeof(pause),
                   ", fill pauses %llu (avg %llu us, max %llu us) of %u threads, %llu in disk reads "
                   "not waited for, longest stop %llu us (thread %u%s), host threads stalled %llu ms, "
-                  "prefaulted %llu reads (%llu MiB, %llu ms)",
+                  "prefaulted %llu granules in %llu batches (%llu MiB, %llu ms)",
                   n(s.fill_pauses), n(s.fill_pauses != 0 ? s.fill_pause_us / s.fill_pauses : 0),
                   n(s.fill_pause_max_us), s.memory_threads, n(s.fill_io_skips),
                   n(s.fill_stop_max_us), s.fill_stop_max_thread,
                   ThreadName(s.fill_stop_max_thread).c_str(), n(s.host_stall_us / 1000),
-                  n(s.prefault_reads), n(s.prefault_bytes >> 20), n(s.prefault_us / 1000));
+                  n(s.prefault_reads), n(s.prefault_batches), n(s.prefault_bytes >> 20),
+                  n(s.prefault_us / 1000));
     if (!since_last || span_ms == 0) {
         return text + std::string{pause};
     }
@@ -1871,6 +2051,7 @@ bool OnFault(u8* address, bool (*commit)(u8* address)) {
 }
 void ForgetPages(u8*, u8*) {}
 void Prefault(const u8*, const u8*) {}
+void Prefault(std::span<const HostRange>) {}
 bool PrefaultEnabled() {
     return false;
 }

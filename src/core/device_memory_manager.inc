@@ -487,16 +487,31 @@ void DeviceMemoryManager<Traits>::ReadBlockUnsafe(DAddr address, void* dest_poin
 }
 
 template <typename Traits>
-void DeviceMemoryManager<Traits>::Prefault(DAddr address, size_t size) {
-    if (size == 0 || !Common::Permafrost::PrefaultEnabled()) {
+void DeviceMemoryManager<Traits>::AppendHostRuns(DAddr address, size_t size,
+                                                 std::vector<Common::Permafrost::HostRange>& runs) {
+    if (size == 0) {
         return;
     }
     WalkBlock(
         address, size, [](size_t, DAddr) {},
-        [](size_t amount, const u8* const pointer) {
-            Common::Permafrost::Prefault(pointer, pointer + amount);
+        [&runs](size_t amount, const u8* const pointer) {
+            if (!runs.empty() && runs.back().begin + runs.back().size == pointer) {
+                runs.back().size += amount;
+            } else {
+                runs.push_back({pointer, amount});
+            }
         },
         [](size_t) {});
+}
+
+template <typename Traits>
+void DeviceMemoryManager<Traits>::Prefault(DAddr address, size_t size) {
+    if (size == 0 || !Common::Permafrost::PrefaultEnabled()) {
+        return;
+    }
+    std::vector<Common::Permafrost::HostRange> runs;
+    AppendHostRuns(address, size, runs);
+    Common::Permafrost::Prefault(runs);
 }
 
 template <typename Traits>

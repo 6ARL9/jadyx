@@ -4,6 +4,7 @@
 #pragma once
 
 #include <cstddef>
+#include <span>
 #include <mutex>
 #include <string>
 #include "common/common_types.h"
@@ -91,10 +92,18 @@ struct Config {
     bool prefault{};
 };
 
-/// Reads back what the swap file holds of [begin, end) now, a read per granule, for a thread about
-/// to read all of it (a texture or buffer upload): its faults would read it a window at a time,
-/// each read pausing every thread. Pages resident, on probation or being moved are left to the
-/// faults. Does nothing without Config::prefault.
+/// A range of host memory a thread is about to read.
+struct HostRange {
+    const u8* begin;
+    size_t size;
+};
+
+/// Reads back what the swap file holds of the ranges now, for a thread about to read all of them
+/// (a texture or buffer upload): its faults would read them a window at a time, each read pausing
+/// every thread, and GPU memory comes in 64 KiB pieces all over the guest's. Every piece is read
+/// at once, several reads in flight, and filled in one pause per batch. Pages resident, on
+/// probation or being moved are left to the faults. Does nothing without Config::prefault.
+void Prefault(std::span<const HostRange> ranges);
 void Prefault(const u8* begin, const u8* end);
 /// Whether Prefault does anything: callers skip walking their ranges otherwise.
 [[nodiscard]] bool PrefaultEnabled();
@@ -233,6 +242,7 @@ struct Stats {
     u32 memory_threads{};     // threads registered to be paused now, guest and host
     u64 fault_stall_us{};     // total time guest threads waited in faults: reads back, restores
     u64 host_stall_us{};      // the part of it on host threads (GPU, services), Prefault included
+    u64 prefault_batches{};   // Prefault's pauses, a batch of granules each
     u64 prefault_reads{};     // reads back by Prefault, and their bytes and time
     u64 prefault_bytes{};
     u64 prefault_us{};

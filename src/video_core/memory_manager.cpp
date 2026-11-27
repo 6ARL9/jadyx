@@ -409,18 +409,23 @@ void MemoryManager::Prefault(GPUVAddr gpu_addr, std::size_t size) const {
     if (size == 0 || !Common::Permafrost::PrefaultEnabled()) {
         return;
     }
+    // Every run of the range first: Permafrost reads all of them in one batch.
+    std::vector<Common::Permafrost::HostRange> runs;
     auto nothing = [](std::size_t, std::size_t, std::size_t) {};
     auto mapped_normal = [&](std::size_t page_index, std::size_t offset, std::size_t amount) {
-        memory.Prefault((DAddr(page_table[page_index]) << cpu_page_bits) + offset, amount);
+        memory.AppendHostRuns((DAddr(page_table[page_index]) << cpu_page_bits) + offset, amount,
+                              runs);
     };
     auto mapped_big = [&](std::size_t page_index, std::size_t offset, std::size_t amount) {
-        memory.Prefault((DAddr(big_page_table_dev[page_index]) << cpu_page_bits) + offset, amount);
+        memory.AppendHostRuns((DAddr(big_page_table_dev[page_index]) << cpu_page_bits) + offset,
+                              amount, runs);
     };
     auto short_pages = [&](std::size_t page_index, std::size_t offset, std::size_t amount) {
         const GPUVAddr base = (page_index << big_page_bits) + offset;
         MemoryOperation(base, amount, false, mapped_normal, nothing, nothing);
     };
     MemoryOperation(gpu_addr, size, true, mapped_big, nothing, short_pages);
+    Common::Permafrost::Prefault(runs);
 }
 
 void MemoryManager::ReadBlock(GPUVAddr gpu_src_addr, void* dest_buffer, std::size_t size, VideoCommon::CacheType which) const {
