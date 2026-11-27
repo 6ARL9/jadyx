@@ -297,6 +297,15 @@ struct BootConfig {
     /// "heap_keep_targets=1": over the texture cap, one empty heap per render target class stays
     /// (D3D12::SetKeepTargetHeaps).
     bool heap_keep_targets{};
+    /// "buffer_recycle=1": cache buffers handed back serve requests a little smaller and stay
+    /// longer (D3D12::SetBufferRecycle).
+    bool buffer_recycle{};
+    /// "astc_scan_direct=1": the alpha scan of an ASTC image reads guest memory where it is
+    /// instead of a copy of it (VideoCommon::astc_scan_direct).
+    bool astc_scan_direct{};
+    /// "texture_read_split=1": a texture read for a GPU decode flushes the buffer cache once per
+    /// run of device memory and copies on the helper threads (VideoCommon::texture_read_split).
+    bool texture_read_split{};
     /// How idle emulated cores wait for work ("idle_spin=off|adaptive|adaptive:<us>|fixed:<us>").
     Common::SpinPolicy idle_spin{};
     /// Per-game JIT profile, compiled before the guest runs ("jit_prewarm=1", the default),

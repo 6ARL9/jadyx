@@ -21,5 +21,9 @@ struct AlphaScan {
 /// neither white nor black, invalid blocks as anything.
 [[nodiscard]] AlphaScan ScanAlpha(std::span<const uint8_t> blocks, uint32_t block_width,
                                   uint32_t block_height);
+/// The same over blocks in several pieces (where guest memory holds an image), each a whole
+/// number of blocks.
+[[nodiscard]] AlphaScan ScanAlpha(std::span<const std::span<const uint8_t>> pieces,
+                                  uint32_t block_width, uint32_t block_height);
 
 } // namespace Tegra::Texture::ASTC

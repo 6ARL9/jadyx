@@ -569,6 +569,24 @@ void ParseBootConfigFile(const std::string& install_path, BootConfig& config) {
                           (config.astc_batch ? "on" : "off"));
                 continue;
             }
+            if (line == "buffer_recycle=0" || line == "buffer_recycle=1") {
+                config.buffer_recycle = line.back() == '1';
+                WriteDiag(std::string{"boot.cfg: cache buffers recycled by near size "} +
+                          (config.buffer_recycle ? "on" : "off"));
+                continue;
+            }
+            if (line == "astc_scan_direct=0" || line == "astc_scan_direct=1") {
+                config.astc_scan_direct = line.back() == '1';
+                WriteDiag(std::string{"boot.cfg: ASTC alpha scan in guest memory "} +
+                          (config.astc_scan_direct ? "on" : "off"));
+                continue;
+            }
+            if (line == "texture_read_split=0" || line == "texture_read_split=1") {
+                config.texture_read_split = line.back() == '1';
+                WriteDiag(std::string{"boot.cfg: texture reads split over helper threads "} +
+                          (config.texture_read_split ? "on" : "off"));
+                continue;
+            }
             if (line == "heap_keep_targets=0" || line == "heap_keep_targets=1") {
                 config.heap_keep_targets = line.back() == '1';
                 WriteDiag(std::string{"boot.cfg: render target heaps kept over the texture cap "} +

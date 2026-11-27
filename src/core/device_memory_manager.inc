@@ -505,6 +505,32 @@ void DeviceMemoryManager<Traits>::AppendHostRuns(DAddr address, size_t size,
 }
 
 template <typename Traits>
+void DeviceMemoryManager<Traits>::AppendCopyRuns(DAddr address, size_t size, u8* dest,
+                                                 std::vector<DeviceCopyRun>& runs) {
+    if (size == 0) {
+        return;
+    }
+    const auto append = [&runs](const u8* source, u8* target, size_t amount) {
+        if (!runs.empty()) {
+            DeviceCopyRun& last = runs.back();
+            const bool both_null = last.source == nullptr && source == nullptr;
+            const bool both_follow = last.source != nullptr && source != nullptr &&
+                                     last.source + last.size == source;
+            if (last.dest + last.size == target && (both_null || both_follow)) {
+                last.size += amount;
+                return;
+            }
+        }
+        runs.push_back({source, target, amount});
+    };
+    WalkBlock(
+        address, size,
+        [&](size_t amount, DAddr) { append(nullptr, dest, amount); },
+        [&](size_t amount, const u8* const pointer) { append(pointer, dest, amount); },
+        [&](size_t amount) { dest += amount; });
+}
+
+template <typename Traits>
 void DeviceMemoryManager<Traits>::Prefault(DAddr address, size_t size) {
     if (size == 0 || !Common::Permafrost::PrefaultEnabled()) {
         return;

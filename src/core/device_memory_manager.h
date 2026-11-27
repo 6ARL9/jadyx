@@ -36,6 +36,14 @@ class Memory;
 template <typename DTraits>
 struct DeviceMemoryManagerAllocator;
 
+/// A piece of a read split into copies: `size` bytes from `source` (nullptr where nothing is
+/// mapped: zeros, as ReadBlockUnsafe writes) to `dest`.
+struct DeviceCopyRun {
+    const u8* source;
+    u8* dest;
+    size_t size;
+};
+
 struct Asid {
     size_t id;
 };
@@ -122,6 +130,9 @@ public:
     /// The host memory runs of the range, for one Prefault of several ranges.
     void AppendHostRuns(DAddr address, size_t size,
                         std::vector<Common::Permafrost::HostRange>& runs);
+    /// ReadBlockUnsafe to `dest` as copies, for a caller that splits them over threads; adjacent
+    /// pieces merge.
+    void AppendCopyRuns(DAddr address, size_t size, u8* dest, std::vector<DeviceCopyRun>& runs);
     /// Same page translation and unmapped behavior; destination must be CPU write-combined.
     void ReadBlockUnsafeToWriteCombined(DAddr address, void* dest_pointer, size_t size);
     void WriteBlock(DAddr address, const void* src_pointer, size_t size);

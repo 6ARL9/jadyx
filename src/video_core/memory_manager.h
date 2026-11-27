@@ -102,6 +102,15 @@ public:
     /// Reads back what the guest swap holds of the range at once, before a read of all of it
     /// (Common::Permafrost::Prefault).
     void Prefault(GPUVAddr gpu_addr, std::size_t size) const;
+    /// The host memory runs of the range, unmapped parts left out (Prefault's ranges).
+    void AppendHostRuns(GPUVAddr gpu_addr, std::size_t size,
+                        std::vector<Common::Permafrost::HostRange>& runs) const;
+    /// ReadBlock as copies for the caller to run, possibly on other threads: the caches are
+    /// flushed here once per run of device memory instead of once per page (a texture's device
+    /// memory is usually one run, its host memory 64 KiB pieces). Unmapped parts read as zeros.
+    void ReadBlockRuns(GPUVAddr gpu_src_addr, u8* dest_buffer, std::size_t size,
+                       VideoCommon::CacheType which,
+                       std::vector<Core::DeviceCopyRun>& runs) const;
     void WriteBlockUnsafe(GPUVAddr gpu_dest_addr, const void* src_buffer, std::size_t size);
     void WriteBlockCached(GPUVAddr gpu_dest_addr, const void* src_buffer, std::size_t size);
 

@@ -48,6 +48,7 @@ struct NamedThread {
     DWORD id{};
     HANDLE handle{};
     std::uint64_t last_ns{};
+    std::uint64_t last_kernel_ns{};
 };
 
 std::atomic<CpuPin> g_pin{CpuPin::Off};
@@ -58,7 +59,7 @@ std::mutex g_named_mutex;
 std::vector<NamedThread> g_named; ///< Under g_named_mutex; handles stay open for the app's life.
 bool g_named_sampled{};          ///< Under g_named_mutex.
 
-std::uint64_t ThreadCpuNs(HANDLE thread) {
+std::uint64_t ThreadCpuNs(HANDLE thread, std::uint64_t* kernel_ns = nullptr) {
     FILETIME creation, exit, kernel, user;
     if (!GetThreadTimes(thread, &creation, &exit, &kernel, &user)) {
         return 0;
@@ -66,6 +67,9 @@ std::uint64_t ThreadCpuNs(HANDLE thread) {
     const auto ticks = [](const FILETIME& time) {
         return (static_cast<std::uint64_t>(time.dwHighDateTime) << 32) | time.dwLowDateTime;
     };
+    if (kernel_ns != nullptr) {
+        *kernel_ns = ticks(kernel) * 100;
+    }
     return (ticks(kernel) + ticks(user)) * 100;
 }
 
@@ -91,7 +95,9 @@ void RegisterNamedThread(const char* name, std::string where) {
         return;
     }
     std::scoped_lock lk{g_named_mutex};
-    g_named.push_back({name, std::move(where), id, handle, ThreadCpuNs(handle)});
+    std::uint64_t kernel_ns = 0;
+    const std::uint64_t cpu_ns = ThreadCpuNs(handle, &kernel_ns);
+    g_named.push_back({name, std::move(where), id, handle, cpu_ns, kernel_ns});
 }
 
 bool ParseIndex(std::string_view text, int& value) {
@@ -338,14 +344,19 @@ std::size_t RepinNamedThreads() {
 std::string NamedThreadCpuReport(std::size_t limit) {
     struct Use {
         std::uint64_t ns;
+        std::uint64_t kernel_ns;
         const NamedThread* thread;
     };
     std::scoped_lock lk{g_named_mutex};
     std::vector<Use> uses;
     for (NamedThread& thread : g_named) {
-        const std::uint64_t now = ThreadCpuNs(thread.handle);
-        uses.push_back({now >= thread.last_ns ? now - thread.last_ns : 0, &thread});
+        std::uint64_t kernel = 0;
+        const std::uint64_t now = ThreadCpuNs(thread.handle, &kernel);
+        uses.push_back({now >= thread.last_ns ? now - thread.last_ns : 0,
+                        kernel >= thread.last_kernel_ns ? kernel - thread.last_kernel_ns : 0,
+                        &thread});
         thread.last_ns = now;
+        thread.last_kernel_ns = kernel;
     }
     const bool first = !g_named_sampled;
     g_named_sampled = true;
@@ -355,8 +366,12 @@ std::string NamedThreadCpuReport(std::size_t limit) {
     std::sort(uses.begin(), uses.end(), [](const Use& a, const Use& b) { return a.ns > b.ns; });
     std::string report;
     for (std::size_t i = 0; i < uses.size() && i < limit; ++i) {
+        // Kernel time: page faults and system calls (GetThreadTimes counts in clock ticks).
+        const std::uint64_t kernel_ms = uses[i].kernel_ns / 1'000'000;
         report += (report.empty() ? "" : ", ") + uses[i].thread->name + " " +
-                  std::to_string(uses[i].ns / 1'000'000) + " ms@" + uses[i].thread->where;
+                  std::to_string(uses[i].ns / 1'000'000) + " ms" +
+                  (kernel_ms != 0 ? " (kernel " + std::to_string(kernel_ms) + ")" : "") + "@" +
+                  uses[i].thread->where;
     }
     return report;
 }

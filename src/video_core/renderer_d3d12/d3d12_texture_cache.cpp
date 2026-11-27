@@ -163,6 +163,11 @@ void SetGcReloadKeep(u32 seconds) {
                                              std::memory_order_relaxed);
 }
 
+void SetTextureReadPaths(bool astc_scan_direct, bool read_split) {
+    VideoCommon::astc_scan_direct.store(astc_scan_direct, std::memory_order_relaxed);
+    VideoCommon::texture_read_split.store(read_split, std::memory_order_relaxed);
+}
+
 void SetAstcGpuDecode(bool enabled) {
     gpu_astc_decode.store(enabled, std::memory_order_relaxed);
 }

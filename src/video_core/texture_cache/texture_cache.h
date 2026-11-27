@@ -40,6 +40,7 @@
 #include "video_core/texture_cache/decode_bc.h"
 #include "video_core/texture_cache/util.h"
 #include "video_core/textures/decoders.h"
+#include "video_core/textures/workers.h"
 
 namespace VideoCommon {
 
@@ -1661,8 +1662,14 @@ void TextureCache<P>::UploadImageContents(Image& image, StagingBuffer& staging) 
         VideoCore::Perf::LapTimer timer;
         VideoCore::FrameTrace::ScopedSpan trace_read{
             VideoCore::FrameTrace::Event::TextureUploadRead, gpu_addr};
-        gpu_memory->ReadBlock(gpu_addr, mapped_span.data(), mapped_span.size_bytes(),
-                              VideoCommon::CacheType::NoTextureCache);
+        if (texture_read_split.load(std::memory_order_relaxed)) {
+            gpu_memory->ReadBlockRuns(gpu_addr, mapped_span.data(), mapped_span.size_bytes(),
+                                      VideoCommon::CacheType::NoTextureCache, read_runs);
+            Tegra::Texture::RunCopies(read_runs);
+        } else {
+            gpu_memory->ReadBlock(gpu_addr, mapped_span.data(), mapped_span.size_bytes(),
+                                  VideoCommon::CacheType::NoTextureCache);
+        }
         trace_read.Finish();
         timer.Lap(VideoCore::Perf::Counter::TextureCacheUnswizzleNs);
         const auto uploads = FullUploadSwizzles(image.info);
@@ -2590,10 +2597,33 @@ ImageId TextureCache<P>::JoinImages(const ImageInfo& info, GPUVAddr gpu_addr, DA
         phase_timer.Lap(VideoCore::Perf::Counter::TextureCacheImageCreateNs);
         // The format is fixed now: ASTC without alpha becomes BC1, half of BC3. What the guest
         // swap holds of it comes back in a read per granule instead of the scan's faults.
-        gpu_memory->Prefault(gpu_addr, CalculateGuestSizeInBytes(new_info));
-        Tegra::Memory::GpuGuestMemory<u8, Tegra::Memory::GuestMemoryFlags::UnsafeRead> blocks(
-            *gpu_memory, gpu_addr, CalculateGuestSizeInBytes(new_info), &swizzle_data_buffer);
-        DetectOpaqueAstc(new_info, std::span<const u8>{blocks.data(), blocks.size()});
+        const size_t guest_size = CalculateGuestSizeInBytes(new_info);
+        bool scanned = false;
+        if (astc_scan_direct.load(std::memory_order_relaxed) && (gpu_addr & 15) == 0) {
+            // Blocks read where guest memory holds them, in 64 KiB pieces, instead of a copy.
+            scan_runs.clear();
+            gpu_memory->AppendHostRuns(gpu_addr, guest_size, scan_runs);
+            if (Common::Permafrost::PrefaultEnabled()) {
+                Common::Permafrost::Prefault(scan_runs);
+            }
+            scan_pieces.clear();
+            bool whole_blocks = true;
+            for (const Common::Permafrost::HostRange& run : scan_runs) {
+                whole_blocks = whole_blocks && (run.size & 15) == 0 &&
+                               (reinterpret_cast<uintptr_t>(run.begin) & 15) == 0;
+                scan_pieces.emplace_back(run.begin, run.size);
+            }
+            if (whole_blocks) {
+                DetectOpaqueAstc(new_info, std::span<const std::span<const u8>>{scan_pieces});
+                scanned = true;
+            }
+        }
+        if (!scanned) {
+            gpu_memory->Prefault(gpu_addr, guest_size);
+            Tegra::Memory::GpuGuestMemory<u8, Tegra::Memory::GuestMemoryFlags::UnsafeRead>
+                blocks(*gpu_memory, gpu_addr, guest_size, &swizzle_data_buffer);
+            DetectOpaqueAstc(new_info, std::span<const u8>{blocks.data(), blocks.size()});
+        }
         phase_timer.Lap(VideoCore::Perf::Counter::TextureCacheAstcScanNs);
     }
     const ImageId new_image_id = slot_images.insert(runtime, new_info, gpu_addr, cpu_addr);

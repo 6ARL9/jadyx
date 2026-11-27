@@ -42,6 +42,12 @@ void SetUniformUploadCopy(bool enabled) {
 void SetUniformReuse(bool enabled) {
     uniform_reuse_enabled.store(enabled, std::memory_order_relaxed);
 }
+namespace {
+std::atomic_bool buffer_recycle_wide{false};
+}
+void SetBufferRecycle(bool enabled) {
+    buffer_recycle_wide.store(enabled, std::memory_order_relaxed);
+}
 u64 LostVertexSlotDraws() noexcept {
     return lost_vertex_slot_draws.load(std::memory_order_relaxed);
 }
@@ -396,8 +402,10 @@ BufferCacheRuntime::~BufferCacheRuntime() {
 }
 
 void BufferCacheRuntime::RecycleBuffer(ComPtr<ID3D12Resource> resource, u64 size) {
+    const u64 budget = buffer_recycle_wide.load(std::memory_order_relaxed) ? 64ULL << 20
+                                                                            : MAX_RECYCLED_BYTES;
     if (!VideoCore::FastPaths::Enabled() || size > MAX_RECYCLED_SIZE ||
-        recycled_bytes + size > MAX_RECYCLED_BYTES) {
+        recycled_bytes + size > budget) {
         scheduler.DeferRelease(std::move(resource));
         return;
     }
@@ -409,10 +417,26 @@ void BufferCacheRuntime::RecycleBuffer(ComPtr<ID3D12Resource> resource, u64 size
 ComPtr<ID3D12Resource> BufferCacheRuntime::CreateDefaultBuffer(u64 size) {
     if (!recycled.empty()) {
         const u64 tick = scheduler.CurrentTick();
-        for (RecycledBuffer& entry : recycled) {
-            if (entry.size != size || entry.tick >= tick) {
+        // The exact size, or with SetBufferRecycle the smallest that is at most a quarter (at
+        // least 64 KiB) larger: views and copies take their sizes from the cache, not the width.
+        const u64 slack = buffer_recycle_wide.load(std::memory_order_relaxed)
+                              ? (std::max)(size / 4, u64{64} * 1024)
+                              : 0;
+        size_t best = recycled.size();
+        for (size_t i = 0; i < recycled.size(); ++i) {
+            const RecycledBuffer& entry = recycled[i];
+            if (entry.size < size || entry.size > size + slack || entry.tick >= tick) {
                 continue;
             }
+            if (best == recycled.size() || entry.size < recycled[best].size) {
+                best = i;
+                if (entry.size == size) {
+                    break;
+                }
+            }
+        }
+        if (best != recycled.size()) {
+            RecycledBuffer& entry = recycled[best];
             ComPtr<ID3D12Resource> reused = std::move(entry.resource);
             recycled_bytes -= entry.size;
             entry = std::move(recycled.back());
@@ -468,8 +492,10 @@ ComPtr<ID3D12Resource> BufferCacheRuntime::CreateDefaultBuffer(u64 size) {
 void BufferCacheRuntime::TickFrame(Common::SlotVector<Buffer>&) noexcept {
     ++recycle_frame;
     buffer_heaps.TickFrame();
+    const u64 keep_frames =
+        buffer_recycle_wide.load(std::memory_order_relaxed) ? 600 : RECYCLED_FRAMES;
     for (size_t i = 0; i < recycled.size();) {
-        if (recycle_frame - recycled[i].frame < RECYCLED_FRAMES) {
+        if (recycle_frame - recycled[i].frame < keep_frames) {
             ++i;
             continue;
         }

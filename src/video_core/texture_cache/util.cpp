@@ -809,8 +809,13 @@ bool WantsOpaqueAstcScan(const ImageInfo& info) noexcept {
 }
 
 void DetectOpaqueAstc(ImageInfo& info, std::span<const u8> guest_blocks) noexcept {
+    const std::span<const u8> pieces[]{guest_blocks};
+    DetectOpaqueAstc(info, std::span<const std::span<const u8>>{pieces});
+}
+
+void DetectOpaqueAstc(ImageInfo& info, std::span<const std::span<const u8>> pieces) noexcept {
     const Tegra::Texture::ASTC::AlphaScan scan = Tegra::Texture::ASTC::ScanAlpha(
-        guest_blocks, DefaultBlockWidth(info.format), DefaultBlockHeight(info.format));
+        pieces, DefaultBlockWidth(info.format), DefaultBlockHeight(info.format));
     info.astc_opaque = !scan.alpha;
     info.astc_mask = scan.white_mask   ? AstcMask::White
                      : scan.black_mask ? AstcMask::Black

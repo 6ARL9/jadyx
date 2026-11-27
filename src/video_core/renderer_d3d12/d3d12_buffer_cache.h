@@ -32,6 +32,11 @@ void SetUniformUploadCopy(bool enabled);
 /// Opt-in rebinding of a streamed uniform buffer whose bytes did not change within a submission,
 /// for subsequently created runtimes.
 void SetUniformReuse(bool enabled);
+/// Buffers handed back reused for a request up to a quarter (at least 64 KiB) smaller, kept 600
+/// frames instead of 30 within 64 MiB instead of 24 ("buffer_recycle=1"). Metroid Prime
+/// Remastered's room loads made 100 to 140 buffers at 0.1 ms each while 239 of 406 requests
+/// found no buffer of their exact size (0.4.4.26).
+void SetBufferRecycle(bool enabled);
 /// Draws recorded since boot with an enabled vertex slot the command list did not hold (a list
 /// restarted inside the draw).
 [[nodiscard]] u64 LostVertexSlotDraws() noexcept;

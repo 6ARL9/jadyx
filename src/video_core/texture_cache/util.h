@@ -97,6 +97,8 @@ void SetOpaqueAstcToBc1(bool enabled) noexcept;
 /// Sets info.astc_opaque and info.astc_mask from the image's guest ASTC blocks
 /// (Tegra::Texture::ASTC::ScanAlpha).
 void DetectOpaqueAstc(ImageInfo& info, std::span<const u8> guest_blocks) noexcept;
+/// The same over the pieces where guest memory holds the blocks (astc_scan_direct).
+void DetectOpaqueAstc(ImageInfo& info, std::span<const std::span<const u8>> pieces) noexcept;
 
 /// The alpha mask an ASTC image is re-encoded as (BC4 holding the alpha, RGB forced to white or
 /// black when sampled): info.astc_mask when the image would otherwise be BC3, else None.

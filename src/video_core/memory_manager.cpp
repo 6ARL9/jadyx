@@ -405,12 +405,11 @@ void MemoryManager::ReadBlockImpl(GPUVAddr gpu_src_addr, void* dest_buffer, std:
     MemoryOperation(gpu_src_addr, size, true, mapped_big, set_to_zero, read_short_pages);
 }
 
-void MemoryManager::Prefault(GPUVAddr gpu_addr, std::size_t size) const {
-    if (size == 0 || !Common::Permafrost::PrefaultEnabled()) {
+void MemoryManager::AppendHostRuns(GPUVAddr gpu_addr, std::size_t size,
+                                   std::vector<Common::Permafrost::HostRange>& runs) const {
+    if (size == 0) {
         return;
     }
-    // Every run of the range first: Permafrost reads all of them in one batch.
-    std::vector<Common::Permafrost::HostRange> runs;
     auto nothing = [](std::size_t, std::size_t, std::size_t) {};
     auto mapped_normal = [&](std::size_t page_index, std::size_t offset, std::size_t amount) {
         memory.AppendHostRuns((DAddr(page_table[page_index]) << cpu_page_bits) + offset, amount,
@@ -425,7 +424,62 @@ void MemoryManager::Prefault(GPUVAddr gpu_addr, std::size_t size) const {
         MemoryOperation(base, amount, false, mapped_normal, nothing, nothing);
     };
     MemoryOperation(gpu_addr, size, true, mapped_big, nothing, short_pages);
+}
+
+void MemoryManager::Prefault(GPUVAddr gpu_addr, std::size_t size) const {
+    if (size == 0 || !Common::Permafrost::PrefaultEnabled()) {
+        return;
+    }
+    // Every run of the range first: Permafrost reads all of them in one batch.
+    std::vector<Common::Permafrost::HostRange> runs;
+    AppendHostRuns(gpu_addr, size, runs);
     Common::Permafrost::Prefault(runs);
+}
+
+void MemoryManager::ReadBlockRuns(GPUVAddr gpu_src_addr, u8* dest_buffer, std::size_t size,
+                                  VideoCommon::CacheType which,
+                                  std::vector<Core::DeviceCopyRun>& runs) const {
+    runs.clear();
+    if (size == 0) {
+        return;
+    }
+    // Device ranges merged first, each flushed once; then the copies.
+    std::vector<std::pair<DAddr, std::size_t>> device_runs;
+    u8* dest = dest_buffer;
+    const auto zero = [&](std::size_t amount) {
+        if (!runs.empty() && runs.back().source == nullptr &&
+            runs.back().dest + runs.back().size == dest) {
+            runs.back().size += amount;
+        } else {
+            runs.push_back({nullptr, dest, amount});
+        }
+        dest += amount;
+    };
+    const auto mapped = [&](DAddr dev_addr, std::size_t amount) {
+        if (!device_runs.empty() &&
+            device_runs.back().first + device_runs.back().second == dev_addr) {
+            device_runs.back().second += amount;
+        } else {
+            device_runs.emplace_back(dev_addr, amount);
+        }
+        memory.AppendCopyRuns(dev_addr, amount, dest, runs);
+        dest += amount;
+    };
+    auto set_to_zero = [&](std::size_t, std::size_t, std::size_t amount) { zero(amount); };
+    auto mapped_normal = [&](std::size_t page_index, std::size_t offset, std::size_t amount) {
+        mapped((DAddr(page_table[page_index]) << cpu_page_bits) + offset, amount);
+    };
+    auto mapped_big = [&](std::size_t page_index, std::size_t offset, std::size_t amount) {
+        mapped((DAddr(big_page_table_dev[page_index]) << cpu_page_bits) + offset, amount);
+    };
+    auto short_pages = [&](std::size_t page_index, std::size_t offset, std::size_t amount) {
+        const GPUVAddr base = (page_index << big_page_bits) + offset;
+        MemoryOperation(base, amount, false, mapped_normal, set_to_zero, set_to_zero);
+    };
+    MemoryOperation(gpu_src_addr, size, true, mapped_big, set_to_zero, short_pages);
+    for (const auto& [dev_addr, amount] : device_runs) {
+        rasterizer->FlushRegion(dev_addr, amount, which);
+    }
 }
 
 void MemoryManager::ReadBlock(GPUVAddr gpu_src_addr, void* dest_buffer, std::size_t size, VideoCommon::CacheType which) const {

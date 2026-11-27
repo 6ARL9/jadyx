@@ -51,6 +51,7 @@ void SetVolumesInGpuMemory(bool enabled); // d3d12_texture_cache.h
 void SetVolumeUploadBudget(u32 mib); // d3d12_texture_cache.h
 void SetScratchRelease(u32 seconds); // d3d12_texture_cache.h
 void SetGcReloadKeep(u32 seconds); // d3d12_texture_cache.h
+void SetTextureReadPaths(bool astc_scan_direct, bool read_split); // d3d12_texture_cache.h
 void SetAstcGpuDecode(bool enabled); // d3d12_texture_cache.h
 void SetBcGpuDecode(bool enabled); // d3d12_texture_cache.h
 void SetNotZeroedHeaps(bool enabled); // d3d12_resource_utils.h
@@ -111,6 +112,7 @@ void SetWaveSelfTest(bool enabled);          // diagnostics/d3d12_wave_selftest.
 void SetDescriptorRemovalChecks(bool enabled); // d3d12_device.h
 void SetUniformUploadCopy(bool enabled);
 void SetUniformReuse(bool enabled);
+void SetBufferRecycle(bool enabled); // d3d12_buffer_cache.h
 void SetStageViewCache(bool enabled); // d3d12_graphics_pipeline.h
 enum class TextureReplayMode : u8; // d3d12_graphics_pipeline.h: Off, On, Check
 void SetTextureReplay(TextureReplayMode mode);

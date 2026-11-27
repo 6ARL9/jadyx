@@ -2144,39 +2144,74 @@ static u32 ClassifyBlock(std::span<const u8, 16> block, u32 block_width, u32 blo
 }
 
 AlphaScan ScanAlpha(std::span<const u8> blocks, u32 block_width, u32 block_height) {
-    const size_t count = blocks.size() / 16;
+    const std::span<const u8> pieces[]{blocks};
+    return ScanAlpha(std::span<const std::span<const u8>>{pieces}, block_width, block_height);
+}
+
+AlphaScan ScanAlpha(std::span<const std::span<const u8>> pieces, u32 block_width,
+                    u32 block_height) {
     // Most blocks have no alpha endpoint mode and need no decode; the rest are decoded on the
-    // workers until one has real alpha (large arrays hold millions of blocks).
+    // workers until one has real alpha (large arrays hold millions of blocks). A task takes about
+    // CHUNK blocks, from one piece or several (guest memory holds images in 64 KiB pieces).
     constexpr size_t CHUNK = 16384;
+    struct Range {
+        const u8* begin;
+        size_t count;
+    };
     std::atomic<bool> alpha{false};
     Common::ThreadWorker& workers{GetThreadWorkers()};
-    for (size_t first = 0; first < count; first += CHUNK) {
-        const size_t last = (std::min)(count, first + CHUNK);
-        workers.QueueWork([blocks, block_width, block_height, first, last, &alpha] {
-            for (size_t i = first; i < last; ++i) {
-                if (alpha.load(std::memory_order_relaxed)) {
-                    return;
-                }
-                const std::span<const u8, 16> block = blocks.subspan(i * 16).first<16>();
-                if (BlockMayHaveAlpha(block) &&
-                    (ClassifyBlock(block, block_width, block_height) & BLOCK_ALPHA) != 0) {
-                    alpha.store(true, std::memory_order_relaxed);
-                    return;
+    std::vector<Range> ranges;
+    size_t queued = 0;
+    const auto queue = [&] {
+        if (ranges.empty()) {
+            return;
+        }
+        workers.QueueWork([task = std::move(ranges), block_width, block_height, &alpha] {
+            // The blocks may be read where guest memory holds them.
+            RegisterMemoryWorker();
+            for (const Range& range : task) {
+                for (size_t i = 0; i < range.count; ++i) {
+                    if (alpha.load(std::memory_order_relaxed)) {
+                        return;
+                    }
+                    const std::span<const u8, 16> block{range.begin + i * 16, 16};
+                    if (BlockMayHaveAlpha(block) &&
+                        (ClassifyBlock(block, block_width, block_height) & BLOCK_ALPHA) != 0) {
+                        alpha.store(true, std::memory_order_relaxed);
+                        return;
+                    }
                 }
             }
         });
+        ranges = {};
+        queued = 0;
+    };
+    for (const std::span<const u8> piece : pieces) {
+        const size_t count = piece.size() / 16;
+        for (size_t first = 0; first < count;) {
+            const size_t amount = (std::min)(count - first, CHUNK - queued);
+            ranges.push_back({piece.data() + first * 16, amount});
+            queued += amount;
+            first += amount;
+            if (queued >= CHUNK) {
+                queue();
+            }
+        }
     }
+    queue();
     workers.WaitForRequests();
     if (!alpha.load(std::memory_order_relaxed)) {
         return {};
     }
     // Masks (constant white or black color under a varying alpha) are rare: other images stop
     // within their first blocks.
+    constexpr u32 NEITHER = BLOCK_NOT_WHITE | BLOCK_NOT_BLACK;
     u32 flags = 0;
-    for (size_t i = 0; i < count && (flags & (BLOCK_NOT_WHITE | BLOCK_NOT_BLACK)) !=
-                                        (BLOCK_NOT_WHITE | BLOCK_NOT_BLACK);
-         ++i) {
-        flags |= ClassifyBlock(blocks.subspan(i * 16).first<16>(), block_width, block_height);
+    for (const std::span<const u8> piece : pieces) {
+        const size_t count = piece.size() / 16;
+        for (size_t i = 0; i < count && (flags & NEITHER) != NEITHER; ++i) {
+            flags |= ClassifyBlock(piece.subspan(i * 16).first<16>(), block_width, block_height);
+        }
     }
     return {.alpha = true,
             .white_mask = (flags & BLOCK_NOT_WHITE) == 0,

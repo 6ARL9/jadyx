@@ -941,6 +941,8 @@ void SetScratchRelease(u32 seconds);
 /// Seconds an image made again soon after the GC evicted it stays through GCs that are not
 /// aggressive (VideoCommon::gc_reload_keep_frames; 0 none, 600 at most).
 void SetGcReloadKeep(u32 seconds);
+/// VideoCommon::astc_scan_direct and VideoCommon::texture_read_split.
+void SetTextureReadPaths(bool astc_scan_direct, bool read_split);
 
 /// Whether ASTC images kept as RGBA8 are decoded by the compute shader (the default) rather than
 /// the CPU. Applies to images created from now on.

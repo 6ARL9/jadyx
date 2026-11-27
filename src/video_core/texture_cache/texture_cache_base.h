@@ -33,6 +33,7 @@
 #include "common/scratch_buffer.h"
 #include "common/slot_vector.h"
 #include "common/thread_worker.h"
+#include "core/device_memory_manager.h"
 #include "video_core/compatible_formats.h"
 #include "video_core/control/channel_state_cache.h"
 #include "video_core/delayed_destruction_ring.h"
@@ -74,6 +75,14 @@ inline std::atomic<u32> scratch_release_seconds{0};
 /// aggressive (0: none). Metroid Prime Remastered evicted 1466 images in a session and made 492
 /// of them (733 MiB) again within 600 frames (0.4.4.25): their uploads were paid twice.
 inline std::atomic<u32> gc_reload_keep_frames{0};
+/// The alpha scan of an ASTC image reads its blocks where guest memory holds them, on the helper
+/// threads, instead of copying them into swizzle_data_buffer first ("astc_scan_direct=1"): the
+/// scan of a Metroid Prime Remastered room load took 13 ms of 125, mostly that copy (0.4.4.26).
+inline std::atomic<bool> astc_scan_direct{false};
+/// A texture read for a GPU decode flushes the buffer cache once per run of device memory
+/// instead of every 64 KiB page, and large reads copy on the helper threads
+/// ("texture_read_split=1"): 66 MiB of a room load took 19.9 ms to read (0.4.4.26).
+inline std::atomic<bool> texture_read_split{false};
 
 /// Draws whose render target registers are clean skip preparing the bound attachments again while
 /// no image changed in a way that preparing them would act on (default; boot.cfg "rt_early_out=0"
@@ -711,6 +720,11 @@ private:
 
     Common::ScratchBuffer<u8> swizzle_data_buffer;
     Common::ScratchBuffer<u8> unswizzle_data_buffer;
+    /// astc_scan_direct: where guest memory holds the image being scanned.
+    std::vector<Common::Permafrost::HostRange> scan_runs;
+    std::vector<std::span<const u8>> scan_pieces;
+    /// texture_read_split: the copies of a texture read.
+    std::vector<Core::DeviceCopyRun> read_runs;
 
     u64 modification_tick = 0;
     u64 frame_tick = 0;
