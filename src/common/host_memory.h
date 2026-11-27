@@ -41,6 +41,7 @@ struct GuestSwapSettings {
     bool pause_fill{true};
     bool pause_hosts{true};
     bool pause_skip_io{};
+    bool prefault{};
 };
 void ConfigureGuestSwap(const GuestSwapSettings& settings);
 /// Whether the backing in use writes cold memory out.

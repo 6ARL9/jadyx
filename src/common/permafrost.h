@@ -86,7 +86,18 @@ struct Config {
     /// drive that took up to 330 ms, with every other thread paused meanwhile (Metroid Prime
     /// Remastered, 0.4.4.20: a fifth of the frozen time).
     bool pause_skip_io{};
+    /// Whether Prefault reads a range back at once (a read per granule) instead of the page
+    /// window by window faults of a thread about to read all of it.
+    bool prefault{};
 };
+
+/// Reads back what the swap file holds of [begin, end) now, a read per granule, for a thread about
+/// to read all of it (a texture or buffer upload): its faults would read it a window at a time,
+/// each read pausing every thread. Pages resident, on probation or being moved are left to the
+/// faults. Does nothing without Config::prefault.
+void Prefault(const u8* begin, const u8* end);
+/// Whether Prefault does anything: callers skip walking their ranges otherwise.
+[[nodiscard]] bool PrefaultEnabled();
 
 /// The calling thread runs guest code: it is paused while a read back fills pages. Unregistered
 /// before it exits.
@@ -221,6 +232,10 @@ struct Stats {
     u32 fill_stop_max_thread{};
     u32 memory_threads{};     // threads registered to be paused now, guest and host
     u64 fault_stall_us{};     // total time guest threads waited in faults: reads back, restores
+    u64 host_stall_us{};      // the part of it on host threads (GPU, services), Prefault included
+    u64 prefault_reads{};     // reads back by Prefault, and their bytes and time
+    u64 prefault_bytes{};
+    u64 prefault_us{};
                               // from probation and granules held by another thread
     u32 min_idle_ms{};        // the idle time asked of a victim now
     u32 shielded{};           // granules left alone now

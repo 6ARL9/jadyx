@@ -19,6 +19,7 @@
 #include "common/assert.h"
 #include "common/div_ceil.h"
 #include "common/log_throttle.h"
+#include "common/permafrost.h"
 #include "common/scope_exit.h"
 #include "common/settings.h"
 #include "common/write_combined_copy.h"
@@ -483,6 +484,19 @@ template <typename Traits>
 void DeviceMemoryManager<Traits>::ReadBlockUnsafe(DAddr address, void* dest_pointer, size_t size) {
     ReadBlockUnsafeCopy(address, dest_pointer, size,
         [](void* dst, const void* src, size_t n) { std::memcpy(dst, src, n); });
+}
+
+template <typename Traits>
+void DeviceMemoryManager<Traits>::Prefault(DAddr address, size_t size) {
+    if (size == 0 || !Common::Permafrost::PrefaultEnabled()) {
+        return;
+    }
+    WalkBlock(
+        address, size, [](size_t, DAddr) {},
+        [](size_t amount, const u8* const pointer) {
+            Common::Permafrost::Prefault(pointer, pointer + amount);
+        },
+        [](size_t) {});
 }
 
 template <typename Traits>

@@ -66,6 +66,7 @@ enum class Counter : size_t {
     TextureCacheInserts,
     TextureCacheOverlapNs,
     TextureCacheImageCreateNs,
+    TextureCacheAstcScanNs, ///< the opaque ASTC scan before an image is made, its swap reads included
     TextureCacheRefreshNs,
     TextureCacheStagingNs,
     TextureCacheUnswizzleNs,

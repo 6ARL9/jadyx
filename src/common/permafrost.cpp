@@ -166,6 +166,10 @@ struct Engine {
     std::atomic<u32> min_idle_ms{};
     std::atomic<u32> shielded{};
     std::atomic<u64> fault_stall_us{};
+    std::atomic<u64> host_stall_us{};
+    std::atomic<u64> prefault_reads{};
+    std::atomic<u64> prefault_bytes{};
+    std::atomic<u64> prefault_us{};
     // The batch being put on probation: since when and how much. Step only.
     u64 batch_at{};
     u64 batch_used{};
@@ -1063,10 +1067,13 @@ bool Active() {
 }
 
 void AddStall(Engine& e, std::chrono::steady_clock::time_point start) {
-    e.fault_stall_us.fetch_add(static_cast<u64>(std::chrono::duration_cast<std::chrono::microseconds>(
-                                                    std::chrono::steady_clock::now() - start)
-                                                    .count()),
-                               std::memory_order_relaxed);
+    const u64 us = static_cast<u64>(std::chrono::duration_cast<std::chrono::microseconds>(
+                                        std::chrono::steady_clock::now() - start)
+                                        .count());
+    e.fault_stall_us.fetch_add(us, std::memory_order_relaxed);
+    if (t_guest_slot != nullptr && t_guest_slot->host) {
+        e.host_stall_us.fetch_add(us, std::memory_order_relaxed);
+    }
 }
 
 bool OnFault(u8* address, bool (*commit)(u8* address)) {
@@ -1117,6 +1124,84 @@ bool OnFault(u8* address, bool (*commit)(u8* address)) {
             return ok;
         }
         g.in_flight.fetch_sub(1);
+    }
+}
+
+bool PrefaultEnabled() {
+    Engine* const e = g_engine.load(std::memory_order_acquire);
+    return e != nullptr && e->config.prefault;
+}
+
+void Prefault(const u8* begin, const u8* end) {
+    Engine* const e = g_engine.load(std::memory_order_acquire);
+    if (e == nullptr || !e->config.prefault || begin >= end) {
+        return;
+    }
+    const u8* const low = (std::max)(begin, static_cast<const u8*>(e->base));
+    const u8* const high = (std::min)(end, static_cast<const u8*>(e->base + e->size));
+    if (low >= high) {
+        return;
+    }
+    const size_t first_index = static_cast<size_t>(low - e->base) / GRANULE_SIZE;
+    const size_t last_index = static_cast<size_t>(high - 1 - e->base) / GRANULE_SIZE;
+    for (size_t index = first_index; index <= last_index; ++index) {
+        Granule& g = e->table[index];
+        if (g.state.load(std::memory_order_acquire) != Swapped) {
+            continue; // resident, on probation (a touch restores it) or another thread's
+        }
+        g.in_flight.fetch_add(1);
+        u8 state = Swapped;
+        if (!g.state.compare_exchange_strong(state, Busy)) {
+            g.in_flight.fetch_sub(1);
+            continue;
+        }
+        u8* const granule = e->base + index * GRANULE_SIZE;
+        const size_t first_page =
+            static_cast<size_t>((std::max)(low, static_cast<const u8*>(granule)) - granule) / PAGE_SIZE;
+        const size_t end_page =
+            (static_cast<size_t>((std::min)(high, static_cast<const u8*>(granule + GRANULE_SIZE)) -
+                                 granule) +
+             PAGE_SIZE - 1) /
+            PAGE_SIZE;
+        const size_t first_chunk = first_page / CHUNK_PAGES;
+        const size_t last_chunk = (end_page + CHUNK_PAGES - 1) / CHUNK_PAGES;
+        const auto start = std::chrono::steady_clock::now();
+        const u64 now = NowMs();
+        if (g.evicted_at != 0) {
+            // A read back like a fault's: the same bookkeeping of how soon it came back.
+            const u64 distance = now - g.evicted_at;
+            g.evicted_at = 0;
+            e->refaults.fetch_add(1, std::memory_order_relaxed);
+            if (distance < e->config.quick_refault_ms) {
+                g.heat = static_cast<u8>((std::min)(g.heat + 1, int{MAX_HEAT}));
+                Shield(g, now + (std::min)(u64{e->config.shield_ms} << (g.heat - 1),
+                                           u64{e->config.shield_max_ms}));
+                e->quick_refaults.fetch_add(1, std::memory_order_relaxed);
+                e->quick_pending.fetch_add(1, std::memory_order_relaxed);
+            } else if (distance > 4 * u64{e->config.quick_refault_ms}) {
+                g.heat >>= 1;
+            }
+            g.window = 0;
+        }
+        g.last_access.store(now, std::memory_order_relaxed);
+        const u64 before = e->read_bytes.load(std::memory_order_relaxed);
+        const bool ok = ReadBack(*e, g, granule, first_chunk, last_chunk, false);
+        const u64 read = e->read_bytes.load(std::memory_order_relaxed) - before;
+        SettleOut(g);
+        g.in_flight.fetch_sub(1);
+        AddStall(*e, start);
+        if (read != 0) {
+            e->prefault_reads.fetch_add(1, std::memory_order_relaxed);
+            e->prefault_bytes.fetch_add(read, std::memory_order_relaxed);
+            e->prefault_us.fetch_add(
+                static_cast<u64>(std::chrono::duration_cast<std::chrono::microseconds>(
+                                     std::chrono::steady_clock::now() - start)
+                                     .count()),
+                std::memory_order_relaxed);
+        }
+        if (!ok) {
+            return; // the faults try again, page by page
+        }
     }
 }
 
@@ -1539,6 +1624,10 @@ Stats GetStats() {
     stats.fill_stop_max_thread = e->fill_stop_max_thread.load(std::memory_order_relaxed);
     stats.memory_threads = g_memory_threads.load(std::memory_order_relaxed);
     stats.fault_stall_us = e->fault_stall_us.load(std::memory_order_relaxed);
+    stats.host_stall_us = e->host_stall_us.load(std::memory_order_relaxed);
+    stats.prefault_reads = e->prefault_reads.load(std::memory_order_relaxed);
+    stats.prefault_bytes = e->prefault_bytes.load(std::memory_order_relaxed);
+    stats.prefault_us = e->prefault_us.load(std::memory_order_relaxed);
     return stats;
 }
 
@@ -1615,14 +1704,16 @@ std::string Describe(bool since_last) {
         n(s.evictions), n(s.quick_refaults), n(s.refaults), s.shielded, s.min_idle_ms,
         n(s.window_reads), n(s.prefetch_reads), n(s.zero_faults), n(s.probe_hits), n(s.probe_arms),
         n(s.fault_stall_us / 1000));
-    char pause[320];
+    char pause[480];
     std::snprintf(pause, sizeof(pause),
                   ", fill pauses %llu (avg %llu us, max %llu us) of %u threads, %llu in disk reads "
-                  "not waited for, longest stop %llu us (thread %u%s)",
+                  "not waited for, longest stop %llu us (thread %u%s), host threads stalled %llu ms, "
+                  "prefaulted %llu reads (%llu MiB, %llu ms)",
                   n(s.fill_pauses), n(s.fill_pauses != 0 ? s.fill_pause_us / s.fill_pauses : 0),
                   n(s.fill_pause_max_us), s.memory_threads, n(s.fill_io_skips),
                   n(s.fill_stop_max_us), s.fill_stop_max_thread,
-                  ThreadName(s.fill_stop_max_thread).c_str());
+                  ThreadName(s.fill_stop_max_thread).c_str(), n(s.host_stall_us / 1000),
+                  n(s.prefault_reads), n(s.prefault_bytes >> 20), n(s.prefault_us / 1000));
     if (!since_last || span_ms == 0) {
         return text + std::string{pause};
     }
@@ -1779,6 +1870,10 @@ bool OnFault(u8* address, bool (*commit)(u8* address)) {
     return commit(address);
 }
 void ForgetPages(u8*, u8*) {}
+void Prefault(const u8*, const u8*) {}
+bool PrefaultEnabled() {
+    return false;
+}
 bool IsResident(const u8*) {
     return true;
 }

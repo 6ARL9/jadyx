@@ -115,6 +115,9 @@ public:
 
     void ReadBlock(DAddr address, void* dest_pointer, size_t size);
     void ReadBlockUnsafe(DAddr address, void* dest_pointer, size_t size);
+    /// Reads back what the guest swap holds of the range at once (Common::Permafrost::Prefault),
+    /// before a read of all of it.
+    void Prefault(DAddr address, size_t size);
     /// Same page translation and unmapped behavior; destination must be CPU write-combined.
     void ReadBlockUnsafeToWriteCombined(DAddr address, void* dest_pointer, size_t size);
     void WriteBlock(DAddr address, const void* src_pointer, size_t size);

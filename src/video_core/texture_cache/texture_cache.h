@@ -1650,6 +1650,8 @@ template <typename StagingBuffer>
 void TextureCache<P>::UploadImageContents(Image& image, StagingBuffer& staging) {
     const std::span<u8> mapped_span = staging.mapped_span;
     const GPUVAddr gpu_addr = image.gpu_addr;
+    // A texture read from the guest swap in a read per granule, not the copy's faults.
+    gpu_memory->Prefault(gpu_addr, image.guest_size_bytes);
 
     if (True(image.flags & ImageFlagBits::AcceleratedUpload)) {
         VideoCore::Perf::LapTimer timer;
@@ -2581,10 +2583,14 @@ ImageId TextureCache<P>::JoinImages(const ImageInfo& info, GPUVAddr gpu_addr, DA
     }
 
     if (WantsOpaqueAstcScan(new_info)) {
-        // The format is fixed now: ASTC without alpha becomes BC1, half of BC3.
+        phase_timer.Lap(VideoCore::Perf::Counter::TextureCacheImageCreateNs);
+        // The format is fixed now: ASTC without alpha becomes BC1, half of BC3. What the guest
+        // swap holds of it comes back in a read per granule instead of the scan's faults.
+        gpu_memory->Prefault(gpu_addr, CalculateGuestSizeInBytes(new_info));
         Tegra::Memory::GpuGuestMemory<u8, Tegra::Memory::GuestMemoryFlags::UnsafeRead> blocks(
             *gpu_memory, gpu_addr, CalculateGuestSizeInBytes(new_info), &swizzle_data_buffer);
         DetectOpaqueAstc(new_info, std::span<const u8>{blocks.data(), blocks.size()});
+        phase_timer.Lap(VideoCore::Perf::Counter::TextureCacheAstcScanNs);
     }
     const ImageId new_image_id = slot_images.insert(runtime, new_info, gpu_addr, cpu_addr);
     phase_timer.Lap(VideoCore::Perf::Counter::TextureCacheImageCreateNs);

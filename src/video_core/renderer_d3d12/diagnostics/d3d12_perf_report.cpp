@@ -186,7 +186,7 @@ std::string DescribeDrawCosts(const VideoCore::Perf::Snapshot& d, double interva
         "fences {}) | commands: {} submit lists {:.1f} ms ({:.1f} ms "
         "outside draw/clear/dispatch), {} ticks {:.1f} ms, {} invalidations {:.1f} ms | uploads: "
         "{} maps {:.1f} ms, {} repacks {:.1f} ms, {} copies {:.1f} ms | texture cache: "
-        "{} finds {:.1f} ms, {} inserts {:.1f} ms (overlap {:.1f}, image {:.1f}, refresh "
+        "{} finds {:.1f} ms, {} inserts {:.1f} ms (overlap {:.1f}, image {:.1f}, ASTC scan {:.1f}, refresh "
         "{:.1f}, register {:.1f}), {} views {:.1f} ms [setup {:.1f}, reinterpret {:.1f}, "
         "base {:.1f} (compat {:.1f}), SRV {:.1f}, attachments {:.1f}, slot {:.1f}, "
         "grow {} / {:.1f}, placement {:.1f} [clock {:.1f}, free {:.1f}, construct {:.1f}, bit "
@@ -231,6 +231,7 @@ std::string DescribeDrawCosts(const VideoCore::Perf::Snapshot& d, double interva
         get(Counter::TextureCacheFinds), ns_ms(Counter::TextureCacheFindNs),
         get(Counter::TextureCacheInserts), ns_ms(Counter::TextureCacheInsertNs),
         ns_ms(Counter::TextureCacheOverlapNs), ns_ms(Counter::TextureCacheImageCreateNs),
+        ns_ms(Counter::TextureCacheAstcScanNs),
         ns_ms(Counter::TextureCacheRefreshNs), ns_ms(Counter::TextureCacheRegisterNs),
         get(Counter::TextureCacheViewsCreated), view_total_ms, view_setup_ms, view_reinterpret_ms,
         view_base_ms, view_compatibility_ms, view_srv_ms, view_attachment_ms, view_slot_insert_ms,

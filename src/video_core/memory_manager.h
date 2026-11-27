@@ -99,6 +99,9 @@ public:
      * being flushed.
      */
     void ReadBlockUnsafe(GPUVAddr gpu_src_addr, void* dest_buffer, std::size_t size) const;
+    /// Reads back what the guest swap holds of the range at once, before a read of all of it
+    /// (Common::Permafrost::Prefault).
+    void Prefault(GPUVAddr gpu_addr, std::size_t size) const;
     void WriteBlockUnsafe(GPUVAddr gpu_dest_addr, const void* src_buffer, std::size_t size);
     void WriteBlockCached(GPUVAddr gpu_dest_addr, const void* src_buffer, std::size_t size);
 

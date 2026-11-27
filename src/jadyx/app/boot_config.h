@@ -533,6 +533,9 @@ struct BootConfig {
     /// "guest_swap_pause_io=1": a read back's pause suspends the threads inside a game file read
     /// without waiting for them to stop (Common::Permafrost::Config::pause_skip_io).
     bool guest_swap_pause_skip_io{};
+    /// "guest_swap_prefault=1": a texture or buffer upload reads what is swapped of its range
+    /// back at once (Common::Permafrost::Prefault).
+    bool guest_swap_prefault{};
     /// One owner for the free memory (jadyx/app/memory_coordinator.h, "memory_coordinator=0" turns
     /// it off): when Permafrost evicts what the guest reads straight back, the textures and the
     /// trims give way first and only then Permafrost's marks come down, never below
