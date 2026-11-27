@@ -4,6 +4,7 @@
 #pragma once
 
 #include <array>
+#include <memory>
 #include <optional>
 #include <span>
 #include <vector>
@@ -37,6 +38,10 @@ void SetUniformReuse(bool enabled);
 /// Remastered's room loads made 100 to 140 buffers at 0.1 ms each while 239 of 406 requests
 /// found no buffer of their exact size (0.4.4.26).
 void SetBufferRecycle(bool enabled);
+/// Buffers made ahead on a background thread, a stock per size class sized from what room loads
+/// asked for, within 32 MiB ("buffer_spares=1"); for subsequently created runtimes. Each buffer
+/// made on the GPU thread took 0.12 ms, 140 of them in one frame (0.4.4.26).
+void SetSpareBuffers(bool enabled);
 /// Draws recorded since boot with an enabled vertex slot the command list did not hold (a list
 /// restarted inside the draw).
 [[nodiscard]] u64 LostVertexSlotDraws() noexcept;
@@ -342,6 +347,9 @@ private:
     Tegra::MaxwellDeviceMemoryManager& device_memory;
     /// Where new host buffers are placed, instead of one committed resource each.
     BufferHeapPool buffer_heaps;
+    /// SetSpareBuffers: after buffer_heaps, so it stops before them.
+    struct SpareBuffers;
+    std::unique_ptr<SpareBuffers> spare_buffers;
     GuestDescriptorQueue* descriptor_queue{};
     std::vector<TracedBuffer>* trace_buffers{};
     u32 traced_uniforms{};

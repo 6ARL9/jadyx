@@ -300,6 +300,9 @@ struct BootConfig {
     /// "buffer_recycle=1": cache buffers handed back serve requests a little smaller and stay
     /// longer (D3D12::SetBufferRecycle).
     bool buffer_recycle{};
+    /// "buffer_spares=1": cache buffers made ahead on a background thread
+    /// (D3D12::SetSpareBuffers).
+    bool buffer_spares{};
     /// "astc_scan_direct=1": the alpha scan of an ASTC image reads guest memory where it is
     /// instead of a copy of it (VideoCommon::astc_scan_direct).
     bool astc_scan_direct{};

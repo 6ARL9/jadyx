@@ -113,6 +113,7 @@ void SetDescriptorRemovalChecks(bool enabled); // d3d12_device.h
 void SetUniformUploadCopy(bool enabled);
 void SetUniformReuse(bool enabled);
 void SetBufferRecycle(bool enabled); // d3d12_buffer_cache.h
+void SetSpareBuffers(bool enabled);  // d3d12_buffer_cache.h
 void SetStageViewCache(bool enabled); // d3d12_graphics_pipeline.h
 enum class TextureReplayMode : u8; // d3d12_graphics_pipeline.h: Off, On, Check
 void SetTextureReplay(TextureReplayMode mode);

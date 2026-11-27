@@ -5,13 +5,18 @@
 #include <atomic>
 #include <bit>
 #include <chrono>
+#include <condition_variable>
 #include <cstring>
+#include <mutex>
 #include <stdexcept>
+#include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
 #include "common/alignment.h"
 #include "common/logging.h"
+#include "common/thread.h"
 #include "common/write_combined_copy.h"
 #include "video_core/buffer_cache/buffer_cache.h"
 #include "video_core/geometry_hunt.h"
@@ -44,9 +49,13 @@ void SetUniformReuse(bool enabled) {
 }
 namespace {
 std::atomic_bool buffer_recycle_wide{false};
+std::atomic_bool spare_buffers_enabled{false};
 }
 void SetBufferRecycle(bool enabled) {
     buffer_recycle_wide.store(enabled, std::memory_order_relaxed);
+}
+void SetSpareBuffers(bool enabled) {
+    spare_buffers_enabled.store(enabled, std::memory_order_relaxed);
 }
 u64 LostVertexSlotDraws() noexcept {
     return lost_vertex_slot_draws.load(std::memory_order_relaxed);
@@ -374,6 +383,206 @@ void Buffer::Transition(D3D12_RESOURCE_STATES next, bool mark_written) {
     state_tick = tick;
 }
 
+namespace {
+/// Spare classes in 64 KiB pages (cache buffers are whole pages): at most a third larger than a
+/// request, up to 4 MiB.
+constexpr std::array<u64, 16> SPARE_CLASS_PAGES{1, 2, 3, 4, 5, 6, 8, 10, 12, 16, 20, 24, 32, 40,
+                                                48, 64};
+constexpr size_t SPARE_CLASSES = SPARE_CLASS_PAGES.size();
+constexpr u64 SPARE_PAGE = 64ULL * 1024;
+constexpr u64 SPARE_BUDGET = 32ULL * 1024 * 1024;
+/// Before any room load asked: this many of each class up to 256 KiB.
+constexpr u32 SPARE_SEED = 8;
+constexpr size_t SPARE_SEEDED_CLASSES = 4;
+/// Demand is summed over windows of this many frames (a room load takes a few).
+constexpr u64 SPARE_WINDOW = 30;
+
+constexpr u64 SpareBytes(size_t index) {
+    return SPARE_CLASS_PAGES[index] * SPARE_PAGE;
+}
+
+size_t SpareClass(u64 size) {
+    for (size_t i = 0; i < SPARE_CLASSES; ++i) {
+        if (SpareBytes(i) >= size) {
+            return i;
+        }
+    }
+    return SPARE_CLASSES;
+}
+} // namespace
+
+struct BufferCacheRuntime::SpareBuffers {
+    explicit SpareBuffers(BufferHeapPool& heaps_) : heaps{heaps_} {
+        for (size_t i = 0; i < SPARE_SEEDED_CLASSES; ++i) {
+            target[i] = SPARE_SEED;
+        }
+        thread = std::jthread{[this](std::stop_token stop) { Run(stop); }};
+        Request();
+    }
+
+    ~SpareBuffers() {
+        thread.request_stop();
+        thread.join();
+    }
+
+    /// GPU thread: a request the recycled buffers did not serve, served or not.
+    void Demand(u64 size) {
+        const size_t index = SpareClass(size);
+        if (index != SPARE_CLASSES) {
+            ++window_demand[index];
+        }
+    }
+
+    /// GPU thread: a spare of the request's class, or null.
+    ComPtr<ID3D12Resource> Take(u64 size) {
+        const size_t index = SpareClass(size);
+        if (index == SPARE_CLASSES) {
+            return {};
+        }
+        ComPtr<ID3D12Resource> buffer;
+        {
+            std::scoped_lock lock{mutex};
+            if (!stock[index].empty()) {
+                buffer = std::move(stock[index].back());
+                stock[index].pop_back();
+            }
+        }
+        if (buffer) {
+            ++taken;
+            Request();
+        } else {
+            ++missed;
+        }
+        return buffer;
+    }
+
+    /// GPU thread, once a frame: targets from the peak demand of a window, within the budget.
+    void TickFrame() {
+        if (++frame % SPARE_WINDOW != 0) {
+            return;
+        }
+        if (frame % (SPARE_WINDOW * 120) == 0) {
+            // A quarter less a minute: a part of the game that asks for less frees its stock.
+            for (u32& value : peak) {
+                value -= value / 4;
+            }
+        }
+        std::array<u32, SPARE_CLASSES> wanted{};
+        u64 bytes = 0;
+        for (size_t i = 0; i < SPARE_CLASSES; ++i) {
+            peak[i] = (std::max)(peak[i], window_demand[i]);
+            window_demand[i] = 0;
+            wanted[i] = (std::max)(peak[i], i < SPARE_SEEDED_CLASSES ? SPARE_SEED : 0U);
+            bytes += wanted[i] * SpareBytes(i);
+        }
+        if (bytes > SPARE_BUDGET) {
+            for (u32& value : wanted) {
+                value = static_cast<u32>(value * SPARE_BUDGET / bytes);
+            }
+        }
+        std::vector<ComPtr<ID3D12Resource>> extra;
+        bool short_of = false;
+        {
+            std::scoped_lock lock{mutex};
+            target = wanted;
+            for (size_t i = 0; i < SPARE_CLASSES; ++i) {
+                while (stock[i].size() > target[i]) {
+                    extra.push_back(std::move(stock[i].back()));
+                    stock[i].pop_back();
+                }
+                short_of = short_of || stock[i].size() < target[i];
+            }
+        }
+        // Never used by the GPU: released here.
+        extra.clear();
+        if (short_of) {
+            Request();
+        }
+    }
+
+    std::string Report() {
+        std::scoped_lock lock{mutex};
+        size_t count = 0;
+        u64 bytes = 0;
+        for (size_t i = 0; i < SPARE_CLASSES; ++i) {
+            count += stock[i].size();
+            bytes += stock[i].size() * SpareBytes(i);
+        }
+        std::string text = fmt::format("spare buffers: {} taken, {} not in stock, {} made, {} "
+                                       "refused, stock {} ({} KiB)",
+                                       taken, missed, made, refused, count, bytes / 1024);
+        taken = missed = made = refused = 0;
+        return text;
+    }
+
+private:
+    void Request() {
+        {
+            std::scoped_lock lock{mutex};
+            wanted_work = true;
+        }
+        wake.notify_one();
+    }
+
+    void Run(std::stop_token stop) {
+        Common::SetCurrentThreadName("D3D12SpareBuffers");
+        Common::SetCurrentThreadPriority(Common::ThreadPriority::Low);
+        while (true) {
+            {
+                std::unique_lock lock{mutex};
+                if (!wake.wait(lock, stop, [this] { return wanted_work; })) {
+                    return;
+                }
+                wanted_work = false;
+            }
+            // The class furthest below its target first, one buffer at a time.
+            while (!stop.stop_requested()) {
+                size_t index = SPARE_CLASSES;
+                {
+                    std::scoped_lock lock{mutex};
+                    u32 deficit = 0;
+                    for (size_t i = 0; i < SPARE_CLASSES; ++i) {
+                        const u32 have = static_cast<u32>(stock[i].size());
+                        if (have < target[i] && target[i] - have > deficit) {
+                            deficit = target[i] - have;
+                            index = i;
+                        }
+                    }
+                }
+                if (index == SPARE_CLASSES) {
+                    break;
+                }
+                ComPtr<ID3D12Resource> buffer = heaps.Create(SpareBytes(index));
+                std::scoped_lock lock{mutex};
+                if (!buffer) {
+                    // Short of memory or the pool is off: until the next request.
+                    ++refused;
+                    break;
+                }
+                stock[index].push_back(std::move(buffer));
+                ++made;
+            }
+        }
+    }
+
+    BufferHeapPool& heaps;
+    // GPU thread.
+    std::array<u32, SPARE_CLASSES> window_demand{};
+    std::array<u32, SPARE_CLASSES> peak{};
+    u64 frame{};
+    // Under mutex (taken and missed: GPU thread, read by Report on it too).
+    std::mutex mutex;
+    std::condition_variable_any wake;
+    bool wanted_work{};
+    std::array<std::vector<ComPtr<ID3D12Resource>>, SPARE_CLASSES> stock;
+    std::array<u32, SPARE_CLASSES> target{};
+    u64 taken{};
+    u64 missed{};
+    u64 made{};
+    u64 refused{};
+    std::jthread thread; ///< last: stopped before the members it uses
+};
+
 BufferCacheRuntime::BufferCacheRuntime(const Device& device_, Scheduler& scheduler_,
                                        StagingBufferPool& staging_,
                                        TransferBufferPool& transfer_buffers_,
@@ -382,9 +591,13 @@ BufferCacheRuntime::BufferCacheRuntime(const Device& device_, Scheduler& schedul
       transfer_buffers{transfer_buffers_}, device_memory{device_memory_}, buffer_heaps{device_},
       uniform_upload_copy{uniform_upload_copy_enabled.load(std::memory_order_relaxed)},
       uniform_reuse{uniform_reuse_enabled.load(std::memory_order_relaxed)} {
+    if (spare_buffers_enabled.load(std::memory_order_relaxed)) {
+        spare_buffers = std::make_unique<SpareBuffers>(buffer_heaps);
+    }
     LOG_INFO(Render, "D3D12: buffer cache runtime ready (short uniform upload copy {}, uniform "
-                     "reuse {})",
-             uniform_upload_copy ? "on" : "off", uniform_reuse ? "on" : "off");
+                     "reuse {}, spare buffers {})",
+             uniform_upload_copy ? "on" : "off", uniform_reuse ? "on" : "off",
+             spare_buffers ? "on" : "off");
 
 }
 
@@ -396,6 +609,7 @@ constexpr u64 RECYCLED_FRAMES = 30;
 } // namespace
 
 BufferCacheRuntime::~BufferCacheRuntime() {
+    spare_buffers.reset();
     for (RecycledBuffer& entry : recycled) {
         scheduler.DeferRelease(std::move(entry.resource));
     }
@@ -446,6 +660,12 @@ ComPtr<ID3D12Resource> BufferCacheRuntime::CreateDefaultBuffer(u64 size) {
         }
         ++recycle_misses;
     }
+    if (spare_buffers) {
+        spare_buffers->Demand(size);
+        if (ComPtr<ID3D12Resource> spare = spare_buffers->Take(size)) {
+            return spare;
+        }
+    }
     using VideoCore::Perf::Counter;
     const auto create_begin = std::chrono::steady_clock::now();
     // A range of a heap made earlier: committing each buffer took about 0.3 ms, 100 to 170 of
@@ -492,6 +712,9 @@ ComPtr<ID3D12Resource> BufferCacheRuntime::CreateDefaultBuffer(u64 size) {
 void BufferCacheRuntime::TickFrame(Common::SlotVector<Buffer>&) noexcept {
     ++recycle_frame;
     buffer_heaps.TickFrame();
+    if (spare_buffers) {
+        spare_buffers->TickFrame();
+    }
     const u64 keep_frames =
         buffer_recycle_wide.load(std::memory_order_relaxed) ? 600 : RECYCLED_FRAMES;
     for (size_t i = 0; i < recycled.size();) {
@@ -506,8 +729,9 @@ void BufferCacheRuntime::TickFrame(Common::SlotVector<Buffer>&) noexcept {
     }
     if (recycle_frame % 1800 == 0 && recycle_hits + recycle_misses != 0) {
         LOG_INFO(Render, "D3D12: recycled cache buffers: {} reused, {} not found, {} kept ({} KiB); "
-                 "{}", recycle_hits, recycle_misses, recycled.size(), recycled_bytes / 1024,
-                 buffer_heaps.Report());
+                 "{}{}{}", recycle_hits, recycle_misses, recycled.size(), recycled_bytes / 1024,
+                 buffer_heaps.Report(), spare_buffers ? "; " : "",
+                 spare_buffers ? spare_buffers->Report() : std::string{});
         recycle_hits = 0;
         recycle_misses = 0;
     }

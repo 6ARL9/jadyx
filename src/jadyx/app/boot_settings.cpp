@@ -465,6 +465,7 @@ void ApplyBootConfig(const BootConfig& config, const BootSurface& surface, bool 
     D3D12::SetUniformUploadCopy(config.upload_copy);
     D3D12::SetUniformReuse(config.uniform_reuse);
     D3D12::SetBufferRecycle(config.buffer_recycle);
+    D3D12::SetSpareBuffers(config.buffer_spares);
     VideoCommon::SetRenderTargetEarlyOut(config.rt_early_out);
     D3D12::SetStageViewCache(config.stage_view_cache);
     D3D12::SetTextureReplay(static_cast<D3D12::TextureReplayMode>(config.texture_replay));

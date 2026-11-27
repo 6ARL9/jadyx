@@ -575,6 +575,12 @@ void ParseBootConfigFile(const std::string& install_path, BootConfig& config) {
                           (config.buffer_recycle ? "on" : "off"));
                 continue;
             }
+            if (line == "buffer_spares=0" || line == "buffer_spares=1") {
+                config.buffer_spares = line.back() == '1';
+                WriteDiag(std::string{"boot.cfg: cache buffers made ahead "} +
+                          (config.buffer_spares ? "on" : "off"));
+                continue;
+            }
             if (line == "astc_scan_direct=0" || line == "astc_scan_direct=1") {
                 config.astc_scan_direct = line.back() == '1';
                 WriteDiag(std::string{"boot.cfg: ASTC alpha scan in guest memory "} +
