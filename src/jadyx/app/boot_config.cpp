@@ -521,6 +521,18 @@ void ParseBootConfigFile(const std::string& install_path, BootConfig& config) {
                 }
                 continue;
             }
+            if (line.starts_with("texture_reload_keep_s=")) {
+                const unsigned long parsed =
+                    std::strtoul(line.substr(line.find('=') + 1).c_str(), nullptr, 10);
+                if (parsed <= 600) {
+                    config.texture_reload_keep_s = static_cast<u32>(parsed);
+                    WriteDiag("boot.cfg: textures made again after an eviction kept " +
+                              std::to_string(parsed) + " s");
+                } else {
+                    WriteDiag("boot.cfg: invalid " + line + " (0-600), ignored");
+                }
+                continue;
+            }
             if (line.starts_with("scratch_release_s=")) {
                 const unsigned long parsed =
                     std::strtoul(line.substr(line.find('=') + 1).c_str(), nullptr, 10);

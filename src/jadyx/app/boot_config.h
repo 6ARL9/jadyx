@@ -282,6 +282,9 @@ struct BootConfig {
     /// "scratch_release_s=N" (0-600): the large upload scratch of the texture cache goes back to
     /// the system after N seconds unused (VideoCommon::scratch_release_seconds; 0 keeps it).
     u32 scratch_release_s{};
+    /// "texture_reload_keep_s=N" (0-600): an image made again soon after the GC evicted it stays
+    /// through GCs that are not aggressive for N seconds (VideoCommon::gc_reload_keep_frames).
+    u32 texture_reload_keep_s{};
     /// "readback_keep=1": small readback buffers (128 KiB and less) stay for the session instead
     /// of going back and being made again (D3D12::SetKeepSmallReadbacks).
     bool readback_keep{};

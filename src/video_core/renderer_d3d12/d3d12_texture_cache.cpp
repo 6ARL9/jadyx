@@ -158,6 +158,11 @@ void SetScratchRelease(u32 seconds) {
                                                std::memory_order_relaxed);
 }
 
+void SetGcReloadKeep(u32 seconds) {
+    VideoCommon::gc_reload_keep_frames.store((std::min)(seconds, 600U) * 60,
+                                             std::memory_order_relaxed);
+}
+
 void SetAstcGpuDecode(bool enabled) {
     gpu_astc_decode.store(enabled, std::memory_order_relaxed);
 }

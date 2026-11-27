@@ -257,6 +257,17 @@ FrameLease PresentManager::AcquireFrame() {
         scheduler.Wait(frame->render_tick);
     }
     const auto render_end = std::chrono::steady_clock::now();
+    if (render_end - free_end >= std::chrono::milliseconds(100)) {
+        // What the frame's copy to the screen was doing: a stuck copy holds the queue's next
+        // submission (QueueWaitBeforeNextSubmit).
+        LOG_WARNING(Render,
+                    "D3D12 present: waited {} ms for the frame's rendering (mailbox {}); copies "
+                    "to the screen {} done of {} signalled, this frame's at {}",
+                    std::chrono::duration_cast<std::chrono::milliseconds>(render_end - free_end)
+                        .count(),
+                    mailbox == Mode::On ? "on" : "off", copy_fence->GetCompletedValue(),
+                    copy_fence_value, frame->copy_value);
+    }
     // The copy then runs outside the emulation queue's order: rendering into the frame again
     // must wait until the copy has read it. A frame comes back FRAME_COUNT frames later, so this
     // practically never blocks.

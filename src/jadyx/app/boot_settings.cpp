@@ -333,6 +333,7 @@ void ApplyBootConfig(const BootConfig& config, const BootSurface& surface, bool 
     D3D12::SetVolumesInGpuMemory(config.volumes_in_gpu_memory);
     D3D12::SetVolumeUploadBudget(config.volume_upload_mib);
     D3D12::SetScratchRelease(config.scratch_release_s);
+    D3D12::SetGcReloadKeep(config.texture_reload_keep_s);
     SetRomReadCache(config.rom_cache);
     SetRomReadAhead(config.rom_readahead);
     SetRomLearn(config.rom_learn);

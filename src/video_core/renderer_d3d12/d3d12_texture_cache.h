@@ -938,6 +938,9 @@ void SetVolumeUploadBudget(u32 mib);
 /// Seconds the texture cache's large upload scratch may stay unused before it goes back to the
 /// system (VideoCommon::scratch_release_seconds; 0 keeps it, 600 at most).
 void SetScratchRelease(u32 seconds);
+/// Seconds an image made again soon after the GC evicted it stays through GCs that are not
+/// aggressive (VideoCommon::gc_reload_keep_frames; 0 none, 600 at most).
+void SetGcReloadKeep(u32 seconds);
 
 /// Whether ASTC images kept as RGBA8 are decoded by the compute shader (the default) rather than
 /// the CPU. Applies to images created from now on.

@@ -215,6 +215,10 @@ void TextureCache<P>::RunGarbageCollector() {
         if (True(image.flags & ImageFlagBits::IsDecoding)) {
             return false;
         }
+        if (!aggressive_mode && image.gc_keep_until > frame_tick) {
+            ++diag_reload_kept;
+            return false;
+        }
         const bool must_download = IsDownloadable(image) && False(image.flags & ImageFlagBits::BadOverlap);
         if ((!aggressive_mode && True(image.flags & ImageFlagBits::CostlyLoad)) ||
             (!high_priority_mode && !sparse_only && must_download)) {
@@ -414,12 +418,12 @@ void TextureCache<P>::TickFrame() {
         });
         LOG_INFO(HW_GPU, "Texture cache diag: {} resized replaced, {} overlaps reclaimed; joins none {} resolved {} "
                  "left {} right {} bad {} ignored {}; gc evicted {} (downloaded {}), skipped "
-                 "download {} costly {}, from sparse heaps {}; reloaded within {} frames {} ({} MiB); used {} MiB "
-                 "expected {} critical {} images {}",
+                 "download {} costly {}, from sparse heaps {}; reloaded within {} frames {} ({} MiB), "
+                 "kept as reloads {}; used {} MiB expected {} critical {} images {}",
                  replaced_resized_images, reclaimed_overlaps, diag_join[0], diag_join[1], diag_join[2],
                  diag_join[3], diag_join[4], diag_join[5], diag_gc[0], diag_gc[1], diag_gc[2],
                  diag_gc[3], diag_sparse_evicted, GC_RELOAD_WINDOW, diag_reload[0], diag_reload[1] >> 20,
-                 total_used_memory >> 20, expected_memory >> 20, critical_memory >> 20,
+                 diag_reload_kept, total_used_memory >> 20, expected_memory >> 20, critical_memory >> 20,
                  slot_images.size());
     }
 
@@ -2604,6 +2608,8 @@ ImageId TextureCache<P>::JoinImages(const ImageInfo& info, GPUVAddr gpu_addr, DA
         if (frame_tick <= evicted->second + GC_RELOAD_WINDOW) {
             ++diag_reload[0];
             diag_reload[1] += new_image.guest_size_bytes;
+            new_image.gc_keep_until =
+                frame_tick + gc_reload_keep_frames.load(std::memory_order_relaxed);
         }
         gc_evicted_at.erase(evicted);
     }

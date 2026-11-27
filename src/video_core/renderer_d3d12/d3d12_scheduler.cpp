@@ -384,6 +384,13 @@ void Scheduler::SubmitRecorded(ID3D12GraphicsCommandList* list, u64 tick) {
         device.Queue()->ExecuteCommandLists(1, lists);
         ThrowIfFailed(device.Queue()->Signal(fence.Get(), tick), "ID3D12CommandQueue::Signal");
     }
+    submit_ns[tick % SUBMIT_RING].store(
+        static_cast<u64>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                             std::chrono::steady_clock::now().time_since_epoch())
+                             .count()),
+        std::memory_order_relaxed);
+    submit_waits[tick % SUBMIT_RING].store(static_cast<u32>(waits.size()),
+                                           std::memory_order_relaxed);
     VideoCore::FrameTrace::Mark(VideoCore::FrameTrace::Event::GpuSubmit);
     CheckRemovedAfter(device.Get(), [&] {
         return fmt::format("submitting tick {} (removed by the GPU or by a recorded command)",
@@ -460,6 +467,7 @@ void Scheduler::Wait(u64 tick) {
         RecordSyncSite('W');
     }
     const auto start = std::chrono::steady_clock::now();
+    const u64 done_before = counted ? fence->GetCompletedValue() : 0;
     const HANDLE event = ThreadWaitEvent();
     if (GpuDiagnosticsEnabled()) TraceGpuOperation(fmt::format("wait BEGIN tick={}", tick));
     {
@@ -475,9 +483,26 @@ void Scheduler::Wait(u64 tick) {
     }
     if (GpuDiagnosticsEnabled()) TraceGpuOperation(fmt::format("wait END tick={} fence={}", tick, fence->GetCompletedValue()));
     if (counted) {
+        const u64 waited_us = VideoCore::Perf::ElapsedUs(start);
         VideoCore::Perf::Add(VideoCore::Perf::Counter::FenceWaits, 1);
-        VideoCore::Perf::Add(VideoCore::Perf::Counter::FenceWaitUs,
-                             VideoCore::Perf::ElapsedUs(start));
+        VideoCore::Perf::Add(VideoCore::Perf::Counter::FenceWaitUs, waited_us);
+        if (waited_us >= 100'000) {
+            // Two 380 ms waits in Metroid Prime Remastered had 7-8 ms of GPU work (0.4.4.25).
+            const size_t slot = tick % SUBMIT_RING;
+            const u64 submitted = submit_ns[slot].load(std::memory_order_relaxed);
+            const u64 start_ns = static_cast<u64>(
+                std::chrono::duration_cast<std::chrono::nanoseconds>(start.time_since_epoch())
+                    .count());
+            LOG_WARNING(Render,
+                        "D3D12: waited {} ms for GPU tick {} ({} done when the wait began, {} "
+                        "submitted); it went to the queue {:.1f} ms before the wait, after {} "
+                        "waits on other queues",
+                        waited_us / 1000, tick, done_before, SubmittedTick(),
+                        submitted != 0 && submitted <= start_ns
+                            ? static_cast<double>(start_ns - submitted) / 1e6
+                            : -1.0,
+                        submit_waits[slot].load(std::memory_order_relaxed));
+        }
     }
 }
 

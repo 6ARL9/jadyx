@@ -70,6 +70,10 @@ inline std::atomic<u32> streamed_volume_budget_mib{6};
 /// session; on a console a few hundred MiB short, that much more of the guest's memory went to
 /// the swap file and came back with every thread paused.
 inline std::atomic<u32> scratch_release_seconds{0};
+/// Frames an image made again soon after the GC evicted it stays through the GCs that are not
+/// aggressive (0: none). Metroid Prime Remastered evicted 1466 images in a session and made 492
+/// of them (733 MiB) again within 600 frames (0.4.4.25): their uploads were paid twice.
+inline std::atomic<u32> gc_reload_keep_frames{0};
 
 /// Draws whose render target registers are clean skip preparing the bound attachments again while
 /// no image changed in a way that preparing them would act on (default; boot.cfg "rt_early_out=0"
@@ -722,6 +726,7 @@ private:
     static constexpr u64 GC_RELOAD_WINDOW = 600;
     std::unordered_map<GPUVAddr, u64> gc_evicted_at; ///< address -> frame it was evicted
     std::array<u64, 2> diag_reload{};
+    u64 diag_reload_kept = 0; ///< GC visits that kept an image for gc_reload_keep_frames
 
     struct ChurnAddress {
         u32 creates = 0;

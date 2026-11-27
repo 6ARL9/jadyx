@@ -106,6 +106,9 @@ struct ImageBase {
     VAddr cpu_addr_end = 0;
 
     u64 modification_tick = 0;
+    /// A reload of an image the GC evicted stays through GCs that are not aggressive until this
+    /// frame (gc_reload_keep_frames).
+    u64 gc_keep_until = 0;
     size_t lru_index = SIZE_MAX;
 
     std::array<u32, MAX_MIP_LEVELS> mip_level_offsets{};

@@ -306,6 +306,11 @@ private:
     std::atomic<u64> current_tick{1};
     std::atomic<u64> submitted_tick{0};
     mutable std::atomic<u64> known_gpu_tick{0};
+    /// When each recent tick went to the queue (steady clock, ns), and after how many waits on
+    /// other queues' fences: a long wait names what held it.
+    static constexpr size_t SUBMIT_RING = 256;
+    std::array<std::atomic<u64>, SUBMIT_RING> submit_ns{};
+    std::array<std::atomic<u32>, SUBMIT_RING> submit_waits{};
 };
 
 } // namespace D3D12
