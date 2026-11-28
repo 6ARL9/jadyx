@@ -163,6 +163,98 @@ void SetGcReloadKeep(u32 seconds) {
                                              std::memory_order_relaxed);
 }
 
+namespace {
+std::atomic<bool> image_recycle{false};
+constexpr u64 RECYCLED_IMAGE_BYTES = 48ULL << 20;
+constexpr u64 RECYCLED_IMAGE_MAX = 4ULL << 20;
+/// Over the texture cap or short of memory: only small ones (render targets of effects).
+constexpr u64 RECYCLED_SMALL_BYTES = 8ULL << 20;
+constexpr u64 RECYCLED_SMALL_MAX = 256ULL << 10;
+constexpr size_t RECYCLED_IMAGE_ENTRIES = 1024;
+constexpr u64 RECYCLED_IMAGE_FRAMES = 300;
+
+bool SameRequest(const D3D12_RESOURCE_DESC& a, const D3D12_RESOURCE_DESC& b) {
+    return a.Dimension == b.Dimension && a.Alignment == b.Alignment && a.Width == b.Width &&
+           a.Height == b.Height && a.DepthOrArraySize == b.DepthOrArraySize &&
+           a.MipLevels == b.MipLevels && a.Format == b.Format &&
+           a.SampleDesc.Count == b.SampleDesc.Count &&
+           a.SampleDesc.Quality == b.SampleDesc.Quality && a.Layout == b.Layout &&
+           a.Flags == b.Flags;
+}
+} // namespace
+
+void SetImageRecycle(bool enabled) {
+    image_recycle.store(enabled, std::memory_order_relaxed);
+}
+
+bool TextureCacheRuntime::KeepRecycledImage(RecycledImage&& entry) {
+    const u64 total = recycle_small_only ? RECYCLED_SMALL_BYTES : RECYCLED_IMAGE_BYTES;
+    const u64 largest = recycle_small_only ? RECYCLED_SMALL_MAX : RECYCLED_IMAGE_MAX;
+    if (entry.bytes == 0 || entry.bytes > largest || recycled_image_bytes + entry.bytes > total ||
+        recycled_images.size() >= RECYCLED_IMAGE_ENTRIES) {
+        return false;
+    }
+    entry.tick = scheduler.CurrentTick();
+    entry.frame = recycled_frame;
+    recycled_image_bytes += entry.bytes;
+    recycled_images.push_back(std::move(entry));
+    ++image_recycle_kept;
+    return true;
+}
+
+std::optional<TextureCacheRuntime::RecycledImage> TextureCacheRuntime::TakeRecycledImage(
+    const D3D12_RESOURCE_DESC& desc, u32 block_bytes, u32 block_width, u32 block_height) {
+    if (!image_recycle.load(std::memory_order_relaxed)) {
+        return std::nullopt;
+    }
+    for (size_t i = 0; i < recycled_images.size(); ++i) {
+        RecycledImage& entry = recycled_images[i];
+        if (!SameRequest(entry.desc, desc) || entry.block_bytes != block_bytes ||
+            entry.block_width != block_width || entry.block_height != block_height ||
+            !scheduler.IsFree(entry.tick)) {
+            continue;
+        }
+        RecycledImage taken = std::move(entry);
+        if (i + 1 != recycled_images.size()) {
+            entry = std::move(recycled_images.back());
+        }
+        recycled_images.pop_back();
+        recycled_image_bytes -= taken.bytes;
+        ++image_recycle_hits;
+        return taken;
+    }
+    ++image_recycle_misses;
+    return std::nullopt;
+}
+
+void TextureCacheRuntime::TickRecycledImages(bool short_of_memory) {
+    ++recycled_frame;
+    recycle_small_only = short_of_memory;
+    const bool emergency = pressure_level >= CachePressure::Emergency;
+    for (size_t i = 0; i < recycled_images.size();) {
+        RecycledImage& entry = recycled_images[i];
+        const bool expired = recycled_frame - entry.frame >= RECYCLED_IMAGE_FRAMES;
+        if (!expired && !emergency && !(short_of_memory && entry.bytes > RECYCLED_SMALL_MAX)) {
+            ++i;
+            continue;
+        }
+        recycled_image_bytes -= entry.bytes;
+        texture_allocator.DeferRelease(
+            {std::move(entry.resource), std::move(entry.allocation), true});
+        if (i + 1 != recycled_images.size()) {
+            entry = std::move(recycled_images.back());
+        }
+        recycled_images.pop_back();
+    }
+    if (recycled_frame % 1800 == 0 && image_recycle_hits + image_recycle_kept != 0) {
+        LOG_INFO(Render, "D3D12: recycled textures: {} reused, {} not found, {} kept, {} waiting "
+                 "({} KiB){}", image_recycle_hits, image_recycle_misses, image_recycle_kept,
+                 recycled_images.size(), recycled_image_bytes / 1024,
+                 recycle_small_only ? ", small ones only" : "");
+        image_recycle_hits = image_recycle_misses = image_recycle_kept = 0;
+    }
+}
+
 void SetTextureReadPaths(bool astc_scan_direct, bool read_split) {
     VideoCommon::astc_scan_direct.store(astc_scan_direct, std::memory_order_relaxed);
     VideoCommon::texture_read_split.store(read_split, std::memory_order_relaxed);
@@ -523,6 +615,8 @@ void TextureCacheRuntime::TickFrame() {
     }
     const bool release_idle = pressure_level >= CachePressure::Critical || over_texture_cap ||
                               texture_yield.load(std::memory_order_relaxed);
+    // Before the trim: what goes back here can empty a heap.
+    TickRecycledImages(release_idle);
     texture_allocator.TrimEmptyHeaps(
         pressure_level >= CachePressure::Emergency ? TextureResourceAllocator::TrimMode::All
         : pressure_level >= CachePressure::Critical ? TextureResourceAllocator::TrimMode::Settled
@@ -920,12 +1014,31 @@ Image::Image(TextureCacheRuntime& runtime_, const VideoCommon::ImageInfo& info_,
                            !(info_.type == ImageType::e3D &&
                              volumes_in_gpu_memory.load(std::memory_order_relaxed));
         const auto create_begin = std::chrono::steady_clock::now();
-        auto allocated = runtime->texture_allocator.Create(
-            desc, D3D12_RESOURCE_STATE_COMMON, nullptr,
-            {.bytes = VideoCore::Surface::BytesPerBlock(format.copy_format),
-             .width = block_w,
-             .height = block_h},
-            plain);
+        const u32 block_bytes = VideoCore::Surface::BytesPerBlock(format.copy_format);
+        TextureResourceAllocator::Resource allocated;
+        bool recycled_texture = false;
+        if (!alias_blocks) {
+            recyclable = true;
+            recycle_desc = desc;
+            recycle_block_bytes = block_bytes;
+            recycle_block_width = block_w;
+            recycle_block_height = block_h;
+            if (auto recycled =
+                    runtime->TakeRecycledImage(desc, block_bytes, block_w, block_h)) {
+                // The GPU is done with it, in the state its last image left it.
+                allocated.resource = std::move(recycled->resource);
+                allocated.allocation = std::move(recycled->allocation);
+                allocated.placed = true;
+                state = recycled->state;
+                untouched = false;
+                recycled_texture = true;
+            }
+        }
+        if (!recycled_texture) {
+            allocated = runtime->texture_allocator.Create(
+                desc, D3D12_RESOURCE_STATE_COMMON, nullptr,
+                {.bytes = block_bytes, .width = block_w, .height = block_h}, plain);
+        }
         // The hitch report counts creation time, not what was created (heaps included).
         if (const auto create_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::steady_clock::now() - create_begin).count();
@@ -941,7 +1054,8 @@ Image::Image(TextureCacheRuntime& runtime_, const VideoCommon::ImageInfo& info_,
         cpu_writable = allocated.cpu_writable;
         resource = std::move(allocated.resource);
         resource_allocation = std::move(allocated.allocation);
-        needs_placed_init = allocated.placed &&
+        // A recycled texture kept its memory to itself: nothing else was placed over it.
+        needs_placed_init = allocated.placed && !recycled_texture &&
                             (resource_flags & (D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET |
                                                D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL)) != 0;
         if (alias_blocks && resource) {
@@ -990,8 +1104,27 @@ void Image::ReleaseResources() {
         runtime->scheduler.DeferRelease(std::move(block_alias));
     }
     if (runtime && resource) {
-        runtime->texture_allocator.DeferRelease(
-            {std::move(resource), std::move(resource_allocation), resource_allocation != nullptr});
+        bool kept = false;
+        if (recyclable && resource_allocation && !cpu_writable && !block_alias &&
+            image_recycle.load(std::memory_order_relaxed)) {
+            const u64 bytes = TextureResourceAllocator::SizeOf(*resource_allocation);
+            kept = runtime->KeepRecycledImage({.desc = recycle_desc,
+                                               .block_bytes = recycle_block_bytes,
+                                               .block_width = recycle_block_width,
+                                               .block_height = recycle_block_height,
+                                               .resource = resource,
+                                               .allocation = resource_allocation,
+                                               .state = state,
+                                               .bytes = bytes});
+        }
+        if (kept) {
+            resource.Reset();
+            resource_allocation.reset();
+        } else {
+            runtime->texture_allocator.DeferRelease({std::move(resource),
+                                                     std::move(resource_allocation),
+                                                     resource_allocation != nullptr});
+        }
     }
     // The placed resources hold it until their deferred release.
     block_alias_heap.Reset();
@@ -1040,6 +1173,11 @@ Image& Image::operator=(Image&& other) noexcept {
         footprint_format = other.footprint_format;
         state = other.state;
         needs_placed_init = other.needs_placed_init;
+        recyclable = other.recyclable;
+        recycle_desc = other.recycle_desc;
+        recycle_block_bytes = other.recycle_block_bytes;
+        recycle_block_width = other.recycle_block_width;
+        recycle_block_height = other.recycle_block_height;
         write_version = other.write_version;
         uav_work = other.uav_work;
         left_uav_in_work = other.left_uav_in_work;

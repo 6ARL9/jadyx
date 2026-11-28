@@ -818,6 +818,10 @@ size_t TextureResourceAllocator::HeapOf(const Allocation& allocation) {
     return allocation.block_index;
 }
 
+u64 TextureResourceAllocator::SizeOf(const Allocation& allocation) {
+    return allocation.size;
+}
+
 std::string TextureResourceAllocator::Report() const {
     std::scoped_lock lock{state->mutex};
     // Diagnostic: per class heaps, empty heaps, free bytes and largest free range.

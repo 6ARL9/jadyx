@@ -347,6 +347,27 @@ private:
     /// instead of taking new buffers while the GPU still reads the last frame's.
     [[nodiscard]] ID3D12Resource* DepthCopyScratch(u32 index, u64 size);
 
+    /// SetImageRecycle: a released image's placed texture, for the next image of its description.
+    struct RecycledImage {
+        D3D12_RESOURCE_DESC desc{};
+        u32 block_bytes{};
+        u32 block_width{};
+        u32 block_height{};
+        ComPtr<ID3D12Resource> resource;
+        std::shared_ptr<TextureResourceAllocator::Allocation> allocation;
+        D3D12_RESOURCE_STATES state{};
+        u64 tick{};  ///< submission that may still use it
+        u64 frame{}; ///< recycled_frame when kept
+        u64 bytes{};
+    };
+    /// Keeps it (true) or leaves it to the caller to release.
+    bool KeepRecycledImage(RecycledImage&& entry);
+    /// One of that description the GPU is done with, or none.
+    [[nodiscard]] std::optional<RecycledImage> TakeRecycledImage(const D3D12_RESOURCE_DESC& desc,
+                                                                 u32 block_bytes, u32 block_width,
+                                                                 u32 block_height);
+    void TickRecycledImages(bool short_of_memory);
+
     const Device& device;
     Scheduler& scheduler;
     StagingBufferPool& staging;
@@ -366,6 +387,11 @@ private:
     bool has_sparse_heaps{};
     u64 gc_pending_bytes{};
     u64 gc_peak_pending_bytes{};
+    std::vector<RecycledImage> recycled_images;
+    u64 recycled_image_bytes{};
+    u64 recycled_frame{};
+    bool recycle_small_only{}; ///< over the texture cap or short of memory, last frame
+    u64 image_recycle_hits{}, image_recycle_misses{}, image_recycle_kept{};
     u64 gc_queued{}, gc_ready{}, gc_stale{}, gc_sync{};
     D3D12_CPU_DESCRIPTOR_HANDLE null_rtv{};
     D3D12_CPU_DESCRIPTOR_HANDLE null_rtv_ms{};
@@ -717,6 +743,12 @@ private:
     /// A placed render target or depth stencil whose heap memory another resource may have used:
     /// D3D12 requires an aliasing barrier and a discard before its first use.
     bool needs_placed_init{};
+    /// SetImageRecycle: how the texture was asked for, to match a later image's request.
+    bool recyclable{};
+    D3D12_RESOURCE_DESC recycle_desc{};
+    u32 recycle_block_bytes{};
+    u32 recycle_block_width{};
+    u32 recycle_block_height{};
     /// Bumped by every transition into a writable state: every GPU write to the image follows one.
     u64 write_version{1};
     u64 uav_work{}; ///< Scheduler::Work() that last made it a UAV
@@ -941,6 +973,11 @@ void SetScratchRelease(u32 seconds);
 /// Seconds an image made again soon after the GC evicted it stays through GCs that are not
 /// aggressive (VideoCommon::gc_reload_keep_frames; 0 none, 600 at most).
 void SetGcReloadKeep(u32 seconds);
+/// Placed textures of released images kept for an image of the very same description, for 300
+/// frames within 48 MiB (8 MiB of small ones only over the texture cap or short of memory):
+/// "image_recycle=1". Metroid Prime Remastered made and dropped about 240 small render targets a
+/// second in an area, 0.1-0.3 ms each (0.4.4.27).
+void SetImageRecycle(bool enabled);
 /// VideoCommon::astc_scan_direct and VideoCommon::texture_read_split.
 void SetTextureReadPaths(bool astc_scan_direct, bool read_split);
 

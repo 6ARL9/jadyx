@@ -581,6 +581,12 @@ void ParseBootConfigFile(const std::string& install_path, BootConfig& config) {
                           (config.buffer_spares ? "on" : "off"));
                 continue;
             }
+            if (line == "image_recycle=0" || line == "image_recycle=1") {
+                config.image_recycle = line.back() == '1';
+                WriteDiag(std::string{"boot.cfg: released textures recycled "} +
+                          (config.image_recycle ? "on" : "off"));
+                continue;
+            }
             if (line == "astc_scan_direct=0" || line == "astc_scan_direct=1") {
                 config.astc_scan_direct = line.back() == '1';
                 WriteDiag(std::string{"boot.cfg: ASTC alpha scan in guest memory "} +

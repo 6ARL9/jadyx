@@ -98,6 +98,8 @@ public:
     /// they hold empties them, so trim can release them.
     [[nodiscard]] std::vector<bool> SparseHeaps(u32 max_used_percent) const;
     [[nodiscard]] static size_t HeapOf(const Allocation& allocation);
+    /// Bytes of the heap range it holds.
+    [[nodiscard]] static u64 SizeOf(const Allocation& allocation);
     /// A second placed resource of `desc` over the memory of `allocation` (same heap, same
     /// offset), or null when it does not fit there. Released by its owner, before the allocation.
     [[nodiscard]] ComPtr<ID3D12Resource> CreateAlias(const Allocation& allocation,

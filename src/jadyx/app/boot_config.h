@@ -306,6 +306,9 @@ struct BootConfig {
     /// "astc_scan_direct=1": the alpha scan of an ASTC image reads guest memory where it is
     /// instead of a copy of it (VideoCommon::astc_scan_direct).
     bool astc_scan_direct{};
+    /// "image_recycle=1": released placed textures kept for the next of their description
+    /// (D3D12::SetImageRecycle).
+    bool image_recycle{};
     /// "texture_read_split=1": a texture read for a GPU decode flushes the buffer cache once per
     /// run of device memory and copies on the helper threads (VideoCommon::texture_read_split).
     bool texture_read_split{};

@@ -89,7 +89,20 @@ void ServiceFrameworkBase::InvokeRequest(HLERequestContext& ctx) {
         return ReportUnimplementedFunction(ctx, info);
 
     LOG_TRACE(Service, "{}", MakeFunctionString(info->name, GetServiceName(), ctx.CommandBuffer()));
+    const auto start = std::chrono::steady_clock::now();
     handler_invoker(this, info->handler_callback, ctx);
+    // Which service a long guest request was in: the hitch log names only the system call. The
+    // handler's own time, from its service thread (a swapped-out page it reads included).
+    const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::steady_clock::now() - start)
+                        .count();
+    if (ms >= 15) {
+        static std::atomic<u32> logged{0};
+        if (logged.fetch_add(1, std::memory_order_relaxed) < 300) {
+            LOG_WARNING(Service, "slow request: {} {} (command {}) took {} ms", GetServiceName(),
+                        info->name, ctx.GetCommand(), ms);
+        }
+    }
 }
 
 void ServiceFrameworkBase::InvokeRequestTipc(HLERequestContext& ctx) {
