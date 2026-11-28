@@ -138,6 +138,26 @@ void DetectOpaqueAstc(ImageInfo& info, std::span<const std::span<const u8>> piec
 
 [[nodiscard]] bool IsValidEntry(const Tegra::MemoryManager& gpu_memory, const TICEntry& config);
 
+/// The single level of a block linear volume as UnswizzleImage lays it out, for unswizzling a few
+/// slices at a time: a streamed volume then needs no unswizzled copy of itself whole.
+struct VolumeSliceLayout {
+    BufferImageCopy copy; ///< what UnswizzleImage returns for it (buffer_offset 0)
+    u32 bytes_per_block{};
+    u32 tiles_width{};
+    u32 tiles_height{};
+    u32 depth{};
+    u32 block_height{};
+    u32 block_depth{};
+    u32 stride_alignment{};
+    size_t slice_bytes{}; ///< unswizzled bytes of one slice
+};
+/// Only a 3D block linear image with one level and one layer.
+[[nodiscard]] std::optional<VolumeSliceLayout> MakeVolumeSliceLayout(const ImageInfo& info);
+/// Slices [first_slice, first_slice + num_slices) of UnswizzleImage's output for that image, the
+/// first at the start of output (num_slices * slice_bytes).
+void UnswizzleVolumeSlices(const VolumeSliceLayout& layout, std::span<const u8> guest,
+                           std::span<u8> output, u32 first_slice, u32 num_slices);
+
 [[nodiscard]] boost::container::small_vector<BufferImageCopy, 16> UnswizzleImage(
     Tegra::MemoryManager& gpu_memory, GPUVAddr gpu_addr, const ImageInfo& info,
     std::span<const u8> input, std::span<u8> output, const HostRowLayout& host = {});

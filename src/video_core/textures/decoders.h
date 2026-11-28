@@ -42,6 +42,12 @@ void UnswizzleTexture(std::span<u8> output, std::span<const u8> input, u32 bytes
                       u32 width, u32 height, u32 depth, u32 block_height, u32 block_depth,
                       u32 stride_alignment = 1, u32 linear_pitch = 0);
 
+/// Slices [first_slice, first_slice + num_slices) of what UnswizzleTexture writes for a block
+/// linear volume, the first of them at the start of output, on the calling thread.
+void UnswizzleSlices(std::span<u8> output, std::span<const u8> input, u32 bytes_per_pixel,
+                     u32 width, u32 height, u32 depth, u32 block_height, u32 block_depth,
+                     u32 stride_alignment, u32 linear_pitch, u32 first_slice, u32 num_slices);
+
 /// Swizzles linear memory into a block linear texture.
 /// Splits large unswizzles across helper threads (on unless boot.cfg "parallel_unswizzle=0").
 void SetParallelUnswizzle(bool enabled) noexcept;

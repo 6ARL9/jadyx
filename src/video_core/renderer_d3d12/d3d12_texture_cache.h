@@ -980,6 +980,8 @@ void SetGcReloadKeep(u32 seconds);
 void SetImageRecycle(bool enabled);
 /// VideoCommon::astc_scan_direct and VideoCommon::texture_read_split.
 void SetTextureReadPaths(bool astc_scan_direct, bool read_split);
+/// VideoCommon::volume_slices.
+void SetVolumeSlices(bool enabled);
 
 /// Whether ASTC images kept as RGBA8 are decoded by the compute shader (the default) rather than
 /// the CPU. Applies to images created from now on.

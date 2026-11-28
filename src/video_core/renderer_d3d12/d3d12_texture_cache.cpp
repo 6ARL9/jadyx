@@ -255,6 +255,10 @@ void TextureCacheRuntime::TickRecycledImages(bool short_of_memory) {
     }
 }
 
+void SetVolumeSlices(bool enabled) {
+    VideoCommon::volume_slices.store(enabled, std::memory_order_relaxed);
+}
+
 void SetTextureReadPaths(bool astc_scan_direct, bool read_split) {
     VideoCommon::astc_scan_direct.store(astc_scan_direct, std::memory_order_relaxed);
     VideoCommon::texture_read_split.store(read_split, std::memory_order_relaxed);

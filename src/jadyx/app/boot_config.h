@@ -240,7 +240,7 @@ struct BootConfig {
     /// Every read of the game's storage written to the log for offline study ("rom_trace=1").
     bool rom_trace{};
     /// MiB of the console's storage for blocks of games on external storage already read
-    /// ("rom_cache_mib=0-2048"; 0 turns it off).
+    /// ("rom_cache_mib=0-8192"; 0 turns it off).
     u32 rom_cache_mib{1024};
     /// Storage reads held to 40 MB/s ("read_pacing=0|1").
     bool read_pacing{true};
@@ -309,6 +309,9 @@ struct BootConfig {
     /// "image_recycle=1": released placed textures kept for the next of their description
     /// (D3D12::SetImageRecycle).
     bool image_recycle{};
+    /// "volume_slices=1": a streamed BC volume unswizzled a chunk of slices at a time
+    /// (D3D12::SetVolumeSlices).
+    bool volume_slices{};
     /// "texture_read_split=1": a texture read for a GPU decode flushes the buffer cache once per
     /// run of device memory and copies on the helper threads (VideoCommon::texture_read_split).
     bool texture_read_split{};

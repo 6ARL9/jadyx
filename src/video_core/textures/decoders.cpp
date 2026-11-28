@@ -45,7 +45,7 @@ void incrpdep(u32& value) {
 template <bool TO_LINEAR, u32 BYTES_PER_PIXEL>
 void SwizzleImpl(std::span<u8> output, std::span<const u8> input, u32 width, u32 height, u32 depth,
                  u32 block_height, u32 block_depth, u32 stride, u32 linear_pitch, u32 first_row,
-                 u32 num_rows) {
+                 u32 num_rows, u32 linear_row_base) {
     // The origin of the transformation can be configured here, leave it as zero as the current API
     // doesn't expose it.
     static constexpr u32 origin_x = 0;
@@ -98,7 +98,7 @@ void SwizzleImpl(std::span<u8> output, std::span<const u8> input, u32 width, u32
                     const u32 x = column * BYTES_PER_PIXEL;
                     const u32 offset_x = (x >> GOB_SIZE_X_SHIFT) << x_shift;
                     const u32 source = offset_z + offset_y + offset_x + (swizzled_x | swizzled_y);
-                    const u32 target = slice * pitch * height + line * pitch + x;
+                    const u32 target = (slice * height + line - linear_row_base) * pitch + x;
                     std::memcpy(output.data() + target, input.data() + source, 16);
                 }
             }
@@ -110,8 +110,8 @@ void SwizzleImpl(std::span<u8> output, std::span<const u8> input, u32 width, u32
                 const u32 base_swizzled_offset = offset_z + offset_y + offset_x;
                 const u32 swizzled_offset = base_swizzled_offset + (swizzled_x | swizzled_y);
 
-                const u32 unswizzled_offset =
-                    slice * pitch * height + line * pitch + column * BYTES_PER_PIXEL;
+                const u32 unswizzled_offset = (slice * height + line - linear_row_base) * pitch +
+                                              column * BYTES_PER_PIXEL;
 
                 u8* const dst = &output[TO_LINEAR ? swizzled_offset : unswizzled_offset];
                 const u8* const src = &input[TO_LINEAR ? unswizzled_offset : swizzled_offset];
@@ -184,13 +184,13 @@ void SwizzleSubrectImpl(std::span<u8> output, std::span<const u8> input, u32 wid
 template <bool TO_LINEAR>
 void Swizzle(std::span<u8> output, std::span<const u8> input, u32 bytes_per_pixel, u32 width,
              u32 height, u32 depth, u32 block_height, u32 block_depth, u32 stride_alignment,
-             u32 linear_pitch, u32 first_row, u32 num_rows) {
+             u32 linear_pitch, u32 first_row, u32 num_rows, u32 linear_row_base = 0) {
     switch (bytes_per_pixel) {
 #define BPP_CASE(x)                                                                                \
     case x:                                                                                        \
         return SwizzleImpl<TO_LINEAR, x>(output, input, width, height, depth, block_height,        \
                                          block_depth, stride_alignment, linear_pitch, first_row,   \
-                                         num_rows);
+                                         num_rows, linear_row_base);
         BPP_CASE(1)
         BPP_CASE(2)
         BPP_CASE(3)
@@ -267,6 +267,23 @@ void UnswizzleTexture(std::span<u8> output, std::span<const u8> input, u32 bytes
     for (std::thread& helper : helpers) {
         helper.join();
     }
+}
+
+void UnswizzleSlices(std::span<u8> output, std::span<const u8> input, u32 bytes_per_pixel,
+                     u32 width, u32 height, u32 depth, u32 block_height, u32 block_depth,
+                     u32 stride_alignment, u32 linear_pitch, u32 first_slice, u32 num_slices) {
+    if (first_slice >= depth || num_slices == 0) {
+        return;
+    }
+    num_slices = (std::min)(num_slices, depth - first_slice);
+    const u32 stride = Common::AlignUpLog2(width, stride_alignment) * bytes_per_pixel;
+    const u32 new_bpp = (std::min)(4U, static_cast<u32>(std::countr_zero(width * bytes_per_pixel)));
+    width = (width * bytes_per_pixel) >> new_bpp;
+    bytes_per_pixel = 1U << new_bpp;
+    // The rows of those slices only, the first of them at the start of the output.
+    Swizzle<false>(output, input, bytes_per_pixel, width, height, depth, block_height,
+                   block_depth, stride, linear_pitch, first_slice * height, num_slices * height,
+                   first_slice * height);
 }
 
 void SetParallelUnswizzle(bool enabled) noexcept {

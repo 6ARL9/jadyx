@@ -1381,7 +1381,9 @@ void SetRomLearn(bool enabled) {
 }
 
 void SetRomDiskCacheMiB(std::uint32_t mib) {
-    rom_disk_cache_mib.store(std::min<u32>(mib, 2048), std::memory_order_relaxed);
+    // Up to 8 GiB: a 1 GiB cache was refilled by the boot of Metroid Prime Remastered alone, and
+    // 645 MiB of its reads went to the drive again in one session (0.4.4.28).
+    rom_disk_cache_mib.store(std::min<u32>(mib, 8192), std::memory_order_relaxed);
 }
 
 bool ConsumeStorageReadFailure() { return storage_read_failure.exchange(false); }

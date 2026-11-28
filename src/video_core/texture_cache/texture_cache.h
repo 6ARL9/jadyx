@@ -1986,7 +1986,18 @@ void TextureCache<P>::QueueAsyncDecode(Image& image, ImageId image_id) {
             }
         }
         decode_ptr->streaming = true;
+        // volume_slices: each chunk's slices unswizzled from the guest bytes as it goes, with no
+        // unswizzled copy of the whole volume (46 MiB for a BC6H light volume, faulted in anew
+        // at each area load once the idle scratch went back).
+        std::optional<VolumeSliceLayout> slice_layout;
+        if (volume_slices.load(std::memory_order_relaxed)) {
+            slice_layout = MakeVolumeSliceLayout(image.info);
+            if (slice_layout && slice_layout->copy.image_extent.depth <= 1) {
+                slice_layout.reset();
+            }
+        }
         auto stream_func = [info = image.info, gpu_addr = image.gpu_addr, previous_hash, converted,
+                            slice_layout,
                             block_bytes = VideoCore::Surface::BytesPerBlock(image.info.format),
                             unswizzled_size = image.unswizzled_size_bytes,
                             guest_size = image.guest_size_bytes, ranges = std::move(ranges),
@@ -2028,16 +2039,21 @@ void TextureCache<P>::QueueAsyncDecode(Image& image, ImageId image_id) {
                 finish(true, hash);
                 return;
             }
-            scratch->resize(unswizzled_size);
-            // Block-linear images are unswizzled from the bytes alone; the memory manager is only
-            // read for pitch-linear ones, which are never streamed.
-            const auto copies = UnswizzleImage(*memory, gpu_addr, info, guest, *scratch);
-            if (copies.size() != 1 || copies[0].image_subresource.num_layers > 1 ||
-                copies[0].image_extent.depth <= 1) {
-                finish(true, hash); // Not the shape promised: leave the image as it is.
-                return;
+            BufferImageCopy copy{};
+            if (slice_layout) {
+                copy = slice_layout->copy;
+            } else {
+                scratch->resize(unswizzled_size);
+                // Block-linear images are unswizzled from the bytes alone; the memory manager is
+                // only read for pitch-linear ones, which are never streamed.
+                const auto copies = UnswizzleImage(*memory, gpu_addr, info, guest, *scratch);
+                if (copies.size() != 1 || copies[0].image_subresource.num_layers > 1 ||
+                    copies[0].image_extent.depth <= 1) {
+                    finish(true, hash); // Not the shape promised: leave the image as it is.
+                    return;
+                }
+                copy = copies[0];
             }
-            const BufferImageCopy copy = copies[0];
             {
                 BufferImageCopy upload = copy;
                 upload.buffer_offset = 0;
@@ -2056,9 +2072,12 @@ void TextureCache<P>::QueueAsyncDecode(Image& image, ImageId image_id) {
             const u32 chunk_slices =
                 static_cast<u32>((std::max<size_t>)(STREAMED_DECODE_CHUNK / slice_bytes, 1));
             const std::span<const u8> blocks =
-                std::span<const u8>{*scratch}.subspan(copy.buffer_offset);
+                slice_layout ? std::span<const u8>{}
+                             : std::span<const u8>{*scratch}.subspan(copy.buffer_offset);
             const u32 depth = copy.image_extent.depth;
-            if (slice_bytes == 0 || (!converted && slice_bytes * depth > blocks.size())) {
+            if (slice_bytes == 0 ||
+                (!slice_layout && !converted && slice_bytes * depth > blocks.size()) ||
+                (slice_layout && !converted && slice_bytes != slice_layout->slice_bytes)) {
                 finish(true, hash); // Not the layout promised: leave the image as it is.
                 return;
             }
@@ -2078,7 +2097,18 @@ void TextureCache<P>::QueueAsyncDecode(Image& image, ImageId image_id) {
                     }
                 }
                 data.resize(slice_bytes * count);
-                if (converted) {
+                if (slice_layout) {
+                    if (converted) {
+                        // The chunk's blocks first, then decoded.
+                        thread_local std::vector<u8> chunk_blocks;
+                        chunk_blocks.resize(slice_layout->slice_bytes * count);
+                        UnswizzleVolumeSlices(*slice_layout, guest, chunk_blocks, first, count);
+                        DecompressBCnSlices(chunk_blocks, data, copy, info.format, info.type, 0,
+                                            count);
+                    } else {
+                        UnswizzleVolumeSlices(*slice_layout, guest, data, first, count);
+                    }
+                } else if (converted) {
                     DecompressBCnSlices(blocks, data, copy, info.format, info.type, first,
                                         count);
                 } else {
@@ -2156,17 +2186,19 @@ void TextureCache<P>::ReleaseIdleScratch() {
     }
     // From here on nothing decodes: the decoder thread only takes chunks while a decode runs.
     scratch_large_use = now;
-    size_t released = 0;
+    // What each holds, for the log: which one a game makes large.
+    size_t swizzle_bytes = 0, unswizzle_bytes = 0, input_bytes = 0, chunk_bytes = 0,
+           volume_bytes = 0;
     if (swizzle_data_buffer.capacity() > LARGE) {
-        released += swizzle_data_buffer.capacity();
+        swizzle_bytes = swizzle_data_buffer.capacity();
         swizzle_data_buffer = Common::ScratchBuffer<u8>(8_MiB);
     }
     if (unswizzle_data_buffer.capacity() > LARGE) {
-        released += unswizzle_data_buffer.capacity();
+        unswizzle_bytes = unswizzle_data_buffer.capacity();
         unswizzle_data_buffer = Common::ScratchBuffer<u8>(1_MiB);
     }
     for (const std::vector<u8>& input : async_decode_inputs) {
-        released += input.capacity();
+        input_bytes += input.capacity();
     }
     async_decode_inputs.clear();
     {
@@ -2174,15 +2206,20 @@ void TextureCache<P>::ReleaseIdleScratch() {
         // last one (cancelled ones included) ended long before the wait above ran out.
         std::scoped_lock lock{decode_chunk_mutex};
         for (const std::vector<u8>& chunk : decode_chunk_pool) {
-            released += chunk.capacity();
+            chunk_bytes += chunk.capacity();
         }
         decode_chunk_pool.clear();
-        released += async_unswizzle_scratch.capacity();
+        volume_bytes = async_unswizzle_scratch.capacity();
         std::vector<u8>{}.swap(async_unswizzle_scratch);
     }
+    const size_t released = swizzle_bytes + unswizzle_bytes + input_bytes + chunk_bytes +
+                            volume_bytes;
     if (released != 0) {
-        LOG_INFO(HW_GPU, "Texture cache: gave back {} MiB of upload scratch unused for {} s",
-                 released >> 20, seconds);
+        LOG_INFO(HW_GPU, "Texture cache: gave back {} MiB of upload scratch unused for {} s "
+                 "(swizzle {}, unswizzle {}, volume inputs {}, volume chunks {}, volume "
+                 "unswizzle {} MiB)",
+                 released >> 20, seconds, swizzle_bytes >> 20, unswizzle_bytes >> 20,
+                 input_bytes >> 20, chunk_bytes >> 20, volume_bytes >> 20);
     }
 }
 

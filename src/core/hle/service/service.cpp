@@ -97,9 +97,20 @@ void ServiceFrameworkBase::InvokeRequest(HLERequestContext& ctx) {
                         std::chrono::steady_clock::now() - start)
                         .count();
     if (ms >= 15) {
+        // Dequeuing a framebuffer waits for one on purpose (a frame's worth every frame).
+        const std::string_view service = GetServiceName();
+        const bool waits = service == "IHOSBinderDriver";
+        // 20 a minute: the boot's slow requests must not use up the budget of the play.
+        static std::atomic<s64> minute{-1};
         static std::atomic<u32> logged{0};
-        if (logged.fetch_add(1, std::memory_order_relaxed) < 300) {
-            LOG_WARNING(Service, "slow request: {} {} (command {}) took {} ms", GetServiceName(),
+        const s64 now_minute = std::chrono::duration_cast<std::chrono::minutes>(
+                                   std::chrono::steady_clock::now().time_since_epoch())
+                                   .count();
+        if (minute.exchange(now_minute, std::memory_order_relaxed) != now_minute) {
+            logged.store(0, std::memory_order_relaxed);
+        }
+        if (!waits && logged.fetch_add(1, std::memory_order_relaxed) < 20) {
+            LOG_WARNING(Service, "slow request: {} {} (command {}) took {} ms", service,
                         info->name, ctx.GetCommand(), ms);
         }
     }

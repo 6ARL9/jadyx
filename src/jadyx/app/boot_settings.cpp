@@ -370,6 +370,7 @@ void ApplyBootConfig(const BootConfig& config, const BootSurface& surface, bool 
     D3D12::SetKeepTargetHeaps(config.heap_keep_targets);
     D3D12::SetTextureReadPaths(config.astc_scan_direct, config.texture_read_split);
     D3D12::SetImageRecycle(config.image_recycle);
+    D3D12::SetVolumeSlices(config.volume_slices);
     D3D12::SetCpuTextureWrites(config.cpu_texture_writes);
     // RGBA8 ASTC made loading frames upload 150-260 MiB at once and the console run out of memory
     // (0.2.50): textures become BC3 (a quarter of the memory), 2D arrays too unless

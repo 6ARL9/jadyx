@@ -1087,6 +1087,50 @@ bool IsValidEntry(const Tegra::MemoryManager& gpu_memory, const TICEntry& config
     return gpu_memory.GpuToCpuAddress(address, guest_size_bytes).has_value();
 }
 
+std::optional<VolumeSliceLayout> MakeVolumeSliceLayout(const ImageInfo& info) {
+    if (info.type != ImageType::e3D || info.resources.levels != 1 || info.resources.layers != 1) {
+        return std::nullopt;
+    }
+    // UnswizzleImage's level 0 in the default host layout.
+    const u32 bpp_log2 = BytesPerBlockLog2(info.format);
+    const Extent2D tile_size = DefaultBlockSize(info.format);
+    const LevelInfo level_info = MakeLevelInfo(info);
+    const Extent2D gob = GobSize(bpp_log2, info.block.height, info.tile_width_spacing);
+    const Extent3D level_size = AdjustMipSize(info.size, 0);
+    const Extent3D num_tiles = AdjustTileSize(level_size, tile_size);
+    const u32 row_bytes = num_tiles.width << bpp_log2;
+    const Extent3D block = AdjustMipBlockSize(num_tiles, level_info.block, 0, level_info.num_levels);
+    VolumeSliceLayout layout{
+        .copy =
+            BufferImageCopy{
+                .buffer_offset = 0,
+                .buffer_size = static_cast<size_t>(row_bytes) * num_tiles.height * num_tiles.depth,
+                .buffer_row_length = (row_bytes >> bpp_log2) * tile_size.width,
+                .buffer_image_height = Common::AlignUp(level_size.height, tile_size.height),
+                .image_subresource = {.base_level = 0, .base_layer = 0, .num_layers = 1},
+                .image_offset = {0, 0, 0},
+                .image_extent = level_size,
+            },
+        .bytes_per_block = 1U << bpp_log2,
+        .tiles_width = num_tiles.width,
+        .tiles_height = num_tiles.height,
+        .depth = num_tiles.depth,
+        .block_height = block.height,
+        .block_depth = block.depth,
+        .stride_alignment = StrideAlignment(num_tiles, info.block, gob, bpp_log2),
+        .slice_bytes = static_cast<size_t>(row_bytes) * num_tiles.height,
+    };
+    return layout;
+}
+
+void UnswizzleVolumeSlices(const VolumeSliceLayout& layout, std::span<const u8> guest,
+                           std::span<u8> output, u32 first_slice, u32 num_slices) {
+    Tegra::Texture::UnswizzleSlices(output, guest, layout.bytes_per_block, layout.tiles_width,
+                                    layout.tiles_height, layout.depth, layout.block_height,
+                                    layout.block_depth, layout.stride_alignment, 0, first_slice,
+                                    num_slices);
+}
+
 boost::container::small_vector<BufferImageCopy, 16> UnswizzleImage(Tegra::MemoryManager& gpu_memory,
                                                                    GPUVAddr gpu_addr,
                                                                    const ImageInfo& info,

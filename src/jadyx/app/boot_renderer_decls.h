@@ -53,6 +53,7 @@ void SetScratchRelease(u32 seconds); // d3d12_texture_cache.h
 void SetGcReloadKeep(u32 seconds); // d3d12_texture_cache.h
 void SetTextureReadPaths(bool astc_scan_direct, bool read_split); // d3d12_texture_cache.h
 void SetImageRecycle(bool enabled); // d3d12_texture_cache.h
+void SetVolumeSlices(bool enabled); // d3d12_texture_cache.h
 void SetAstcGpuDecode(bool enabled); // d3d12_texture_cache.h
 void SetBcGpuDecode(bool enabled); // d3d12_texture_cache.h
 void SetNotZeroedHeaps(bool enabled); // d3d12_resource_utils.h

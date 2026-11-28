@@ -83,6 +83,9 @@ inline std::atomic<bool> astc_scan_direct{false};
 /// instead of every 64 KiB page, and large reads copy on the helper threads
 /// ("texture_read_split=1"): 66 MiB of a room load took 19.9 ms to read (0.4.4.26).
 inline std::atomic<bool> texture_read_split{false};
+/// A streamed BC volume's chunks unswizzled slice by slice from the guest bytes, with no
+/// unswizzled copy of the whole volume ("volume_slices=1").
+inline std::atomic<bool> volume_slices{false};
 
 /// Draws whose render target registers are clean skip preparing the bound attachments again while
 /// no image changed in a way that preparing them would act on (default; boot.cfg "rt_early_out=0"

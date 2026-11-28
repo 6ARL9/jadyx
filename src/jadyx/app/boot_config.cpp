@@ -581,6 +581,12 @@ void ParseBootConfigFile(const std::string& install_path, BootConfig& config) {
                           (config.buffer_spares ? "on" : "off"));
                 continue;
             }
+            if (line == "volume_slices=0" || line == "volume_slices=1") {
+                config.volume_slices = line.back() == '1';
+                WriteDiag(std::string{"boot.cfg: streamed volumes unswizzled by slices "} +
+                          (config.volume_slices ? "on" : "off"));
+                continue;
+            }
             if (line == "image_recycle=0" || line == "image_recycle=1") {
                 config.image_recycle = line.back() == '1';
                 WriteDiag(std::string{"boot.cfg: released textures recycled "} +
@@ -645,7 +651,7 @@ void ParseBootConfigFile(const std::string& install_path, BootConfig& config) {
             if (line.starts_with("rom_cache_mib=")) {
                 const unsigned long parsed =
                     std::strtoul(line.substr(line.find('=') + 1).c_str(), nullptr, 10);
-                if (parsed <= 2048) {
+                if (parsed <= 8192) {
                     config.rom_cache_mib = static_cast<u32>(parsed);
                     WriteDiag("boot.cfg: ROM disk cache " + std::to_string(parsed) + " MiB");
                 } else {
